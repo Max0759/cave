@@ -4,6 +4,6 @@ window.CAVE_CONFIG = {
   tenantId: '8d12f787-feb6-448b-8654-cfe776342851',
   // Emplacement du fichier de données dans votre OneDrive
   cheminFichier: 'Cave/cave.json',
-  // Adresse du relais IA (dossier worker/), peut aussi être saisie dans Bilan
-  iaUrl: ''
+  // Page « Lecteur d'étiquettes » sur claude.ai (lecture des photos par Claude)
+  lecteurUrl: 'https://claude.ai/artifact/L4YjkwBxeqGYQZyWwAPhWv'
 };

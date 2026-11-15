@@ -443,3 +443,6 @@ ol.rq { margin: 0; padding-left: 20px; display: grid; gap: 4px; }
 ol.rq .btn.link { padding: 0; }
 .tip { position: fixed; z-index: 200; pointer-events: none; background: var(--text); color: var(--bg); font-size: 12.5px; padding: 6px 9px; border-radius: 8px; opacity: 0; transition: opacity .12s; max-width: 240px; line-height: 1.35; }
 .tip.show { opacity: 1; }
+ol.etapes { margin: 0 0 12px; padding-left: 20px; display: grid; gap: 10px; }
+ol.etapes li { display: grid; gap: 4px; }
+a.btn { text-decoration: none; }

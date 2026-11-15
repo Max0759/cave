@@ -378,13 +378,10 @@ function lienPhotoWeb(id) {
   commit(() => { v.photo = x; v.photoMini = x; v.maj = nowIso(); }, x ? 'Image enregistrée' : 'Image retirée');
   ouvrirVin(v.id);
 }
-/* ---------- Lecture d'étiquette par IA ---------- */
-// L'appli envoie la photo au relais (Cloudflare Worker, dossier worker/) qui interroge Claude.
-const IA = {
-  url: () => { try { return localStorage.getItem('cave.iaUrl') || CFG.iaUrl || ''; } catch (e) { return CFG.iaUrl || ''; } },
-  code: () => { try { return localStorage.getItem('cave.iaCode') || ''; } catch (e) { return ''; } },
-  prete: () => !!(IA.url() && IA.code())
-};
+/* ---------- Lecture d'étiquette par Claude ----------
+   La photo est lue par la page « Lecteur d'étiquettes » sur claude.ai (avec l'abonnement Claude,
+   sans API). Elle renvoie ici le résultat : lien « #scan=… » ou code « MACAVE:… » à coller. */
+const LECTEUR = () => CFG.lecteurUrl || 'https://claude.ai/artifact/L4YjkwBxeqGYQZyWwAPhWv';
 let scan = null; // { file, apercu, lu, resultats }
 const MOTS_VIDES = new Set(['domaine', 'dom', 'chateau', 'ch', 'clos', 'de', 'du', 'des', 'la', 'le', 'les', 'et', 'en', 'cuvee', 'vin', 'vins', 'aoc', 'aop', 'igp', 'appellation', 'controlee', 'protegee', 'mis', 'bouteille', 'au', 'a', 'l', 'd']);
 const motsCles = t => norm(t).replace(/[^a-z0-9]+/g, ' ').split(' ').filter(w => w.length > 1 && !MOTS_VIDES.has(w));
@@ -406,49 +403,41 @@ function chercherCorrespondances(lu) {
   computeStock();
   return vinsActifs().map(v => ({ v, s: scoreVin(v, lu) })).filter(x => x.s >= 2).sort((a, b) => b.s - a.s || qte(b.v) - qte(a.v)).slice(0, 4);
 }
-async function imageVersBase64(file) {
-  const img = await imageDepuisFichier(file);
-  const r = await reduire(img, 1568, 0.85);
-  const u = r.dataUrl();
-  return { data: u.slice(u.indexOf(',') + 1), apercu: u };
-}
 function scannerEtiquette() {
-  if (!IA.prete()) {
-    openSheet(`${head('Lecture des étiquettes', 'À configurer une fois')}
-      <p>Pour reconnaître une bouteille en photo, l'appli utilise l'IA Claude via un petit relais à installer une seule fois (voir le fichier <code>worker/LISEZMOI.md</code>).</p>
-      <p class="muted small">Ensuite, renseignez l'adresse du relais et votre code d'accès dans <b>Bilan → Lecture des étiquettes</b>.</p>
-      <div class="row"><button class="btn primary" data-act="ia-reglages">Ouvrir les réglages</button><button class="btn" data-act="boire-rapide">Chercher le vin à la main</button></div>`);
-    return;
-  }
-  const inp = document.createElement('input');
-  inp.type = 'file'; inp.accept = 'image/*'; inp.setAttribute('capture', 'environment');
-  inp.onchange = () => { if (inp.files[0]) analyserPhoto(inp.files[0]); };
-  inp.click();
+  openSheet(`${head('Scanner une bouteille', 'Lecture par Claude, incluse dans votre abonnement')}
+    <ol class="etapes"><li><a class="btn primary" href="${esc(LECTEUR())}" target="_blank" rel="noopener">📷 Ouvrir le lecteur d'étiquettes</a><span class="muted small">Photographiez l'étiquette dans Claude.</span></li>
+    <li>Touchez « Ouvrir dans Ma Cave », ou copiez le code et collez-le ici :</li></ol>
+    <form class="f" id="formCode"><textarea name="code" id="codeScan" rows="3" placeholder="MACAVE:…" autocomplete="off"></textarea>
+    <button class="btn primary">Retrouver la bouteille</button></form>
+    <div class="row"><button class="btn link" data-act="boire-rapide">Chercher le vin à la main</button></div>`, fd => {
+    if (!recevoirScan(fd.code)) { toast('Code non reconnu : copiez-le en entier depuis le lecteur'); return false; }
+    return false; // la feuille de résultat remplace celle-ci
+  });
 }
-async function analyserPhoto(file) {
-  if (!navigator.onLine) { toast('Pas de réseau : cherchez le vin à la main'); choisirVinBu(); return; }
-  let b64;
-  try { b64 = await imageVersBase64(file); } catch (e) { toast('Photo illisible'); return; }
-  scan = { file, apercu: b64.apercu, lu: null, resultats: [] };
-  openSheet(`${head('Lecture de l’étiquette…')}<div class="scan-apercu"><img src="${b64.apercu}" alt=""><div class="scan-onde"></div></div>
-    <p class="muted small" style="text-align:center">L'IA lit l'étiquette, quelques secondes…</p>`);
+function decoderScan(code) {
+  const brut = String(code || '').trim().replace(/^.*?(MACAVE:|#scan=)/s, '').replace(/\s+/g, '');
+  if (!brut) return null;
   try {
-    const r = await fetch(IA.url(), { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Cave-Code': IA.code() }, body: JSON.stringify({ image: b64.data, type: 'image/jpeg' }) });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(j.erreur || 'Erreur ' + r.status);
-    scan.lu = j.vin;
-  } catch (e) {
-    openSheet(`${head('Lecture impossible')}<p>${esc(e.message === 'Failed to fetch' ? 'Relais injoignable (adresse incorrecte ou pas de réseau).' : e.message)}</p>
-      <div class="row"><button class="btn primary" data-act="scanner">Réessayer</button><button class="btn" data-act="boire-rapide">Chercher à la main</button></div>`);
-    return;
-  }
-  if (!scan.lu.estEtiquette) {
-    openSheet(`${head('Pas d’étiquette reconnue')}<div class="scan-apercu"><img src="${scan.apercu}" alt=""></div><p>Cadrez l'étiquette de face, bien éclairée, puis réessayez.</p>
-      <div class="row"><button class="btn primary" data-act="scanner">Reprendre la photo</button><button class="btn" data-act="boire-rapide">Chercher à la main</button></div>`);
-    return;
-  }
-  scan.resultats = chercherCorrespondances(scan.lu);
+    const b64 = brut.replace(/-/g, '+').replace(/_/g, '/');
+    const bin = atob(b64 + '='.repeat((4 - b64.length % 4) % 4));
+    const lu = JSON.parse(new TextDecoder().decode(Uint8Array.from(bin, c => c.charCodeAt(0))));
+    return lu && typeof lu === 'object' ? lu : null;
+  } catch (e) { return null; }
+}
+function recevoirScan(code) {
+  const lu = decoderScan(code);
+  if (!lu) return false;
+  if (!data) { scanEnAttente = lu; toast('Bouteille lue : connectez-vous pour la retrouver'); return true; }
+  scan = { file: null, apercu: '', lu, resultats: chercherCorrespondances(lu) };
   afficherScan();
+  return true;
+}
+let scanEnAttente = null;
+function scanDepuisAdresse() {
+  const h = location.hash;
+  if (!h.startsWith('#scan=')) return;
+  history.replaceState(null, '', location.pathname + location.search);
+  recevoirScan(h);
 }
 function nomLu(lu) { return [lu.domaine, lu.cuvee && lu.cuvee !== lu.domaine ? lu.cuvee : '', lu.appellation && lu.appellation !== lu.cuvee ? lu.appellation : ''].filter(Boolean).join(' · ') || 'Vin non identifié'; }
 function complementsPossibles(v, lu) {
@@ -481,14 +470,14 @@ function afficherScan() {
     </div>`;
   }).join('');
   openSheet(`${head(sur ? 'Bouteille reconnue' : resultats.length ? 'Est-ce l’un de ces vins ?' : 'Vin absent de la cave')}
-    <div class="scan-lu"><img src="${scan.apercu}" alt=""><div><div class="vin-title">${esc(nomLu(lu))}</div>
+    <div class="scan-lu">${scan.apercu ? `<img src="${scan.apercu}" alt="">` : ''}<div><div class="vin-title">${esc(nomLu(lu))}</div>
       <div class="muted small">${esc([lu.millesime || 'Millésime non lu', lu.couleur, lu.region, lu.format !== 'Bouteille' ? lu.format : ''].filter(Boolean).join(' · '))}</div>
       ${lu.cepages ? `<div class="muted small">${esc(lu.cepages)}${lu.gardeFin ? ` · garde ${lu.gardeDebut || '?'}–${lu.gardeFin}` : ''}${lu.prixIndicatif ? ' · ~' + EUR.format(lu.prixIndicatif) : ''}</div>` : ''}
       ${lu.remarque ? `<div class="muted small"><i>${esc(lu.remarque)}</i></div>` : ''}</div></div>
     ${cartes}
-    <label class="check"><input type="checkbox" id="scanPhoto" checked> Utiliser cette photo pour la fiche (si elle n'en a pas)</label>
+    ${scan.file ? `<label class="check"><input type="checkbox" id="scanPhoto" checked> Utiliser cette photo pour la fiche (si elle n'en a pas)</label>` : ''}
     <div class="row" style="margin-top:6px"><button class="btn" data-act="scan-nouveau">➕ Nouveau vin à partir de l'étiquette</button></div>
-    <div class="row"><button class="btn link" data-act="boire-rapide">Pas dans la liste ? Chercher à la main</button><button class="btn link" data-act="scanner">Reprendre la photo</button></div>`);
+    <div class="row"><button class="btn link" data-act="boire-rapide">Pas dans la liste ? Chercher à la main</button><button class="btn link" data-act="scanner">Autre bouteille</button></div>`);
   hydraterPhotos($('#sheetBody'));
 }
 async function photoScanSurFiche(v) {
@@ -496,18 +485,6 @@ async function photoScanSurFiche(v) {
   if (!scan || !scan.file || v.photo || (coche && !coche.checked)) return;
   const file = scan.file; scan.file = null;
   try { const r = await enregistrerPhoto(v, file); commit(() => { Object.assign(v, r); v.maj = nowIso(); }); } catch (e) { /* la photo est facultative */ }
-}
-
-function formIaReglages() {
-  openSheet(`${head('Lecture des étiquettes (IA)')}<form class="f">
-    <p class="muted small" style="margin:0">Adresse du relais Cloudflare et code d'accès choisis lors de l'installation (voir <code>worker/LISEZMOI.md</code>). Ils restent sur cet appareil.</p>
-    <label>Adresse du relais<input name="url" type="url" value="${esc(IA.url())}" placeholder="https://cave-etiquette.xxx.workers.dev" inputmode="url" autocomplete="off"></label>
-    <label>Code d'accès<input name="code" type="password" value="${esc(IA.code())}" autocomplete="off"></label>
-    <button class="btn primary">Enregistrer</button></form>`, fd => {
-    try { localStorage.setItem('cave.iaUrl', fd.url.trim()); localStorage.setItem('cave.iaCode', fd.code.trim()); } catch (e) { toast('Impossible d’enregistrer'); return false; }
-    toast(IA.prete() ? 'Lecture des étiquettes prête' : 'Réglages enregistrés');
-    render();
-  });
 }
 
 const rechercheImage = v => 'https://www.google.com/search?tbm=isch&q=' + encodeURIComponent([v.domaine, v.cuvee, v.appellation, v.millesime, 'bouteille'].filter(Boolean).join(' '));
@@ -921,8 +898,8 @@ function renderBilan() {
   if (verif) html += `<div class="card"><h2>Fiches à compléter</h2><p class="muted small" style="margin:0 0 6px">${plural(verif, 'fiche')} signalée${verif > 1 ? 's' : ''} lors de la reprise du fichier Excel (millésime manquant, appellation corrigée…).</p><button class="btn link" data-act="voir-verif">Les passer en revue</button></div>`;
   html += `<div class="card"><h2>Caves</h2><ul class="list-plain">${data.caves.map(cv => `<li><span>${esc(cv.nom)}</span><button class="btn link" data-act="renommer-cave" data-id="${esc(cv.id)}">Renommer</button></li>`).join('')}</ul>
     <button class="btn" data-act="ajouter-cave" style="margin-top:8px">Ajouter une cave</button></div>`;
-  html += `<div class="card"><h2>Lecture des étiquettes (IA)</h2><p class="small" style="margin:0 0 8px">${IA.prete() ? '✅ Prête : le bouton 📷 reconnaît vos bouteilles.' : 'Non configurée : le bouton 📷 a besoin du relais IA.'}</p>
-    <button class="btn" data-act="ia-reglages">Réglages</button></div>`;
+  html += `<div class="card"><h2>Lecture des étiquettes</h2><p class="small" style="margin:0 0 8px">Le bouton 📷 Scanner ouvre le lecteur d'étiquettes sur claude.ai : la lecture est incluse dans votre abonnement Claude.</p>
+    <a class="btn" href="${esc(LECTEUR())}" target="_blank" rel="noopener">Ouvrir le lecteur</a></div>`;
   const th = themeActuel();
   html += `<div class="card"><h2>Apparence</h2><div class="theme-pick">${[['auto', 'Automatique'], ['etiquette', 'Étiquette'], ['cave', 'Cave']].map(([k, l]) =>
     `<button type="button" class="chip" data-act="theme" data-id="${k}" aria-pressed="${th === k}">${l}</button>`).join('')}</div>
@@ -1370,7 +1347,6 @@ document.addEventListener('click', e => {
     case 'boire': formBoire(id); break;
     case 'boire-rapide': choisirVinBu(); break;
     case 'scanner': scannerEtiquette(); break;
-    case 'ia-reglages': formIaReglages(); break;
     case 'scan-boire': case 'scan-ajouter': {
       const v = vinById(id);
       photoScanSurFiche(v);
@@ -1478,7 +1454,16 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
   try { await initAuth(); } catch (e) { setSync('error', e.message); }
   if (LOCAL_MODE) setSync('local', 'Données enregistrées uniquement dans ce navigateur');
   render();
+  scanDepuisAdresse();
   if (account) await sync();
+  if (scanEnAttente && data) { const lu = scanEnAttente; scanEnAttente = null; scan = { file: null, apercu: '', lu, resultats: chercherCorrespondances(lu) }; afficherScan(); }
 })();
+window.addEventListener('hashchange', scanDepuisAdresse);
+// Coller un code « MACAVE:… » n'importe où dans l'appli
+document.addEventListener('paste', e => {
+  if (e.target.closest && e.target.closest('input, textarea') && e.target.id !== 'codeScan') return;
+  const t = (e.clipboardData || window.clipboardData)?.getData('text') || '';
+  if (/MACAVE:|#scan=/.test(t) && recevoirScan(t)) e.preventDefault();
+});
 
 window.cave = { importerDonnees, get data() { return data; } };

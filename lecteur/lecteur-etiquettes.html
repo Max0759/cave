@@ -1,0 +1,178 @@
+<title>Lecteur d'étiquettes</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+/* Mise en page : une colonne étroite, façon fiche de cave ; photo en haut, lecture dessous, envoi vers Ma Cave en bas. */
+:root {
+  --bg: #f5efe4; --surface: #fffcf6; --surface-2: #efe6d6; --ink: #2a1e1a; --muted: #7a6a5f;
+  --line: #e0d3bf; --rule: #b89a6a; --title: #4a1520; --primary: #7a1f30; --primary-ink: #fffaf0; --gold: #8f6a2c;
+  --ok: #3d7a4e; --bad: #a8291f;
+  --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #15100e; --surface: #1f1815; --surface-2: #2b211d; --ink: #f1e7da; --muted: #a8988a;
+  --line: #3a2d27; --rule: #7d6334; --title: #e6c98f; --primary: #8e2338; --primary-ink: #fbefe4; --gold: #d9b56f;
+  --ok: #7cc496; --bad: #f08a80; color-scheme: dark; } }
+:root[data-theme="dark"] {
+  --bg: #15100e; --surface: #1f1815; --surface-2: #2b211d; --ink: #f1e7da; --muted: #a8988a;
+  --line: #3a2d27; --rule: #7d6334; --title: #e6c98f; --primary: #8e2338; --primary-ink: #fbefe4; --gold: #d9b56f;
+  --ok: #7cc496; --bad: #f08a80; color-scheme: dark; }
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font: 15px/1.45 var(--sans);
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 18px 40px; }
+main { max-width: 520px; margin: 0 auto; display: grid; gap: 16px; }
+header { display: grid; gap: 4px; padding-bottom: 10px; border-bottom: 3px double var(--rule); }
+h1 { font: 600 26px/1.1 var(--serif); color: var(--title); margin: 0; letter-spacing: .03em; font-variant: small-caps; text-wrap: balance; }
+h1 span { color: var(--gold); font-size: .8em; }
+header p { margin: 0; color: var(--muted); font-size: 13.5px; }
+.zone { position: relative; display: grid; place-items: center; min-height: 220px; border: 1.5px dashed var(--rule); border-radius: 12px;
+  background: var(--surface); overflow: hidden; text-align: center; padding: 16px; cursor: pointer; }
+.zone:focus-within { outline: 2px solid var(--gold); outline-offset: 2px; }
+.zone input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.zone img { max-height: 320px; max-width: 100%; border-radius: 8px; display: block; }
+.zone .invite { display: grid; gap: 6px; color: var(--muted); }
+.zone .invite b { font: 600 18px var(--serif); color: var(--title); }
+.zone .bouteille { width: 34px; height: 70px; margin: 0 auto 4px; color: var(--primary); }
+.onde { position: absolute; left: 0; right: 0; height: 3px; background: linear-gradient(90deg, transparent, var(--gold), transparent); animation: balaye 1.6s ease-in-out infinite; }
+@keyframes balaye { 0% { top: 6%; } 50% { top: 92%; } 100% { top: 6%; } }
+@media (prefers-reduced-motion: reduce) { .onde { animation: none; top: 50%; } }
+.etat { font-size: 13.5px; color: var(--muted); text-align: center; min-height: 1.4em; margin: 0; }
+.etat.err { color: var(--bad); }
+.fiche { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 14px; display: grid; gap: 10px; }
+.fiche h2 { margin: 0; font: 600 21px/1.2 var(--serif); color: var(--title); text-wrap: balance; }
+.fiche .mill { color: var(--gold); font: 600 19px var(--serif); }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: 5px 14px; margin: 0; font-size: 14px; }
+dt { color: var(--muted); } dd { margin: 0; min-width: 0; }
+.remarque { font: italic 14.5px var(--serif); color: var(--muted); margin: 0; }
+.envoi { display: grid; gap: 10px; }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 12px 16px; border-radius: 10px; font: 600 15px var(--sans);
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink); text-decoration: none; cursor: pointer; }
+.btn.primaire { background: var(--primary); border-color: var(--primary); color: var(--primary-ink); }
+.btn:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+.code { font: 12px/1.3 ui-monospace, Menlo, Consolas, monospace; width: 100%; min-height: 64px; resize: vertical; padding: 8px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--surface-2); color: var(--ink); word-break: break-all; }
+.aide { font-size: 12.5px; color: var(--muted); margin: 0; }
+.deux { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+@media (max-width: 360px) { .deux { grid-template-columns: 1fr; } }
+</style>
+
+<main>
+  <header>
+    <h1><span>❦</span> Lecteur d'étiquettes</h1>
+    <p>Photographiez une étiquette : Claude la lit avec votre abonnement, puis Ma Cave retrouve la bouteille.</p>
+  </header>
+
+  <label class="zone" id="zone" for="photo">
+    <input type="file" id="photo" accept="image/*" capture="environment" aria-label="Photographier ou choisir une étiquette">
+    <div class="invite" id="invite">
+      <svg class="bouteille" viewBox="0 0 34 70" aria-hidden="true"><path fill="currentColor" d="M13 2h8v16c0 3 7 7 7 15v33a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V33c0-8 7-12 7-15z"/><rect x="9" y="38" width="16" height="16" rx="1" fill="var(--surface)"/></svg>
+      <b>Photographier l'étiquette</b>
+      <span>De face, bien éclairée, millésime visible</span>
+    </div>
+  </label>
+  <p class="etat" id="etat" role="status" aria-live="polite"></p>
+
+  <section class="fiche" id="fiche" hidden>
+    <div><h2 id="nom"></h2><div class="mill" id="mill"></div></div>
+    <dl id="infos"></dl>
+    <p class="remarque" id="remarque" hidden></p>
+  </section>
+
+  <section class="envoi" id="envoi" hidden>
+    <a class="btn primaire" id="ouvrir" href="#" target="_blank" rel="noopener">Ouvrir dans Ma Cave</a>
+    <div class="deux">
+      <button class="btn" id="copier" type="button">Copier le code</button>
+      <button class="btn" id="encore" type="button">Autre bouteille</button>
+    </div>
+    <textarea class="code" id="code" readonly aria-label="Code à coller dans Ma Cave"></textarea>
+    <p class="aide">Si Ma Cave est installée sur l'écran d'accueil, copiez le code puis, dans Ma Cave : 📷 Scanner → Coller le code.</p>
+  </section>
+</main>
+
+<script>
+const APPLI = "https://max0759.github.io/cave/";
+const $ = id => document.getElementById(id);
+const etat = (t, err) => { $("etat").textContent = t; $("etat").classList.toggle("err", !!err); };
+let sample = null;
+let ctl = null;
+
+const CONSIGNE = `Tu aides à gérer une cave à vin personnelle. L'image est la photo d'une bouteille ou de son étiquette.
+Lis l'étiquette et identifie le vin. Ne devine pas le millésime : s'il n'est pas lisible, mets null.
+Pour les cépages, la période de garde et le prix indicatif, utilise tes connaissances générales sur ce vin ; null ou "" si tu ne sais pas.
+L'année en cours est ${new Date().getFullYear()}.
+Réponds UNIQUEMENT par un objet JSON avec exactement ces champs :
+{"estEtiquette": true|false, "domaine": "", "cuvee": "", "appellation": "",
+ "region": "Alsace|Beaujolais|Bordeaux|Bourgogne|Champagne|Jura|Languedoc|Loire|Provence|Rhône|Savoie|Sud-Ouest|Étranger|",
+ "couleur": "Rouge|Blanc|Rosé|Jaune|Effervescent|Liquoreux|", "millesime": 2019 ou null,
+ "format": "Bouteille|Demi-bouteille|Magnum|Jéroboam", "cepages": "", "gardeDebut": année ou null, "gardeFin": année ou null,
+ "prixIndicatif": euros par bouteille ou null, "texteLu": "principaux mots lus", "remarque": "courte remarque en français ou chaîne vide"}`;
+
+// Code transmis à Ma Cave : JSON compact en base64 (UTF-8)
+const encoder = obj => btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify(obj)))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+
+function afficher(vin) {
+  const nom = [vin.domaine, vin.cuvee && vin.cuvee !== vin.domaine ? vin.cuvee : ""].filter(Boolean).join(" · ") || vin.appellation || "Vin non identifié";
+  $("nom").textContent = nom;
+  $("mill").textContent = vin.millesime ? String(vin.millesime) : "Millésime non lu";
+  const lignes = [
+    ["Appellation", vin.appellation], ["Région", vin.region], ["Couleur", vin.couleur],
+    ["Format", vin.format && vin.format !== "Bouteille" ? vin.format : ""], ["Cépages", vin.cepages],
+    ["Garde", vin.gardeDebut || vin.gardeFin ? `${vin.gardeDebut || "?"} → ${vin.gardeFin || "?"}` : ""],
+    ["Prix indicatif", vin.prixIndicatif ? `≈ ${Math.round(vin.prixIndicatif)} €` : ""]
+  ].filter(([, v]) => v);
+  $("infos").replaceChildren(...lignes.flatMap(([k, v]) => { const dt = document.createElement("dt"); dt.textContent = k; const dd = document.createElement("dd"); dd.textContent = v; return [dt, dd]; }));
+  $("remarque").hidden = !vin.remarque; $("remarque").textContent = vin.remarque || "";
+  $("fiche").hidden = false;
+  const champs = ["estEtiquette", "domaine", "cuvee", "appellation", "region", "couleur", "millesime", "format", "cepages", "gardeDebut", "gardeFin", "prixIndicatif", "texteLu", "remarque"];
+  const propre = Object.fromEntries(champs.map(k => [k, vin[k] ?? null]));
+  const code = "MACAVE:" + encoder(propre);
+  $("code").value = code;
+  $("ouvrir").href = APPLI + "#scan=" + code.slice(7);
+  $("envoi").hidden = false;
+}
+
+async function lire(file) {
+  if (!sample) { etat("La lecture par Claude n'est pas disponible ici. Ouvrez cette page sur claude.ai ou dans l'appli Claude.", true); return; }
+  const url = URL.createObjectURL(file);
+  const img = new Image(); img.src = url; img.alt = "Étiquette photographiée";
+  const onde = document.createElement("div"); onde.className = "onde";
+  $("zone").replaceChildren($("photo"), img, onde);
+  $("fiche").hidden = true; $("envoi").hidden = true;
+  etat("Claude lit l'étiquette…");
+  ctl?.abort(); ctl = new AbortController();
+  try {
+    const vin = await sample.json(CONSIGNE, { images: file, signal: ctl.signal });
+    if (!vin || typeof vin !== "object") throw { code: "invalid_json" };
+    if (vin.estEtiquette === false) { etat("Aucune étiquette reconnue. Reprenez la photo de face, bien éclairée.", true); return; }
+    etat("");
+    afficher(vin);
+  } catch (e) {
+    const msg = {
+      not_granted: "Autorisez cette page à utiliser Claude pour lire les étiquettes.",
+      rate_limited: "Limite d'utilisation atteinte pour le moment. Réessayez un peu plus tard.",
+      image_rejected: "Cette image n'est pas lisible. Essayez une autre photo.",
+      images_unavailable: "Cette vue ne peut pas envoyer d'images à Claude. Ouvrez la page sur claude.ai.",
+      session_expired: "Reconnectez-vous à Claude puis réessayez.",
+      refused: "Claude n'a pas pu traiter cette image.",
+      invalid_json: "Lecture incomplète. Touchez la photo pour réessayer.",
+      cancelled: ""
+    }[e && e.code] ?? "Lecture interrompue. Touchez la photo pour réessayer.";
+    if (msg) etat(msg, true);
+  } finally { onde.remove(); }
+}
+
+$("photo").addEventListener("change", e => { const f = e.target.files[0]; e.target.value = ""; if (f) lire(f); });
+$("encore").addEventListener("click", () => $("photo").click());
+$("copier").addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText($("code").value); etat("Code copié. Collez-le dans Ma Cave."); }
+  catch { $("code").select(); etat("Sélectionnez le code puis copiez-le."); }
+});
+
+(async () => {
+  if (!window.claude) { etat("Ouvrez cette page sur claude.ai ou dans l'appli Claude pour lire les étiquettes.", true); return; }
+  sample = await claude.use("sample");
+  if (!sample) { etat("La lecture par Claude n'est pas disponible dans cette vue.", true); return; }
+  const lim = await sample.limits().catch(() => null);
+  if (!lim || !lim.images) { sample = null; etat("Cette vue ne peut pas envoyer de photo à Claude.", true); }
+})();
+</script>
