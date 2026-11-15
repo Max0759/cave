@@ -654,6 +654,10 @@ function renderBilan() {
   if (verif) html += `<div class="card"><h2>Fiches à compléter</h2><p class="muted small" style="margin:0 0 6px">${plural(verif, 'fiche')} signalée${verif > 1 ? 's' : ''} lors de la reprise du fichier Excel (millésime manquant, appellation corrigée…).</p><button class="btn link" data-act="voir-verif">Les passer en revue</button></div>`;
   html += `<div class="card"><h2>Caves</h2><ul class="list-plain">${data.caves.map(cv => `<li><span>${esc(cv.nom)}</span><button class="btn link" data-act="renommer-cave" data-id="${esc(cv.id)}">Renommer</button></li>`).join('')}</ul>
     <button class="btn" data-act="ajouter-cave" style="margin-top:8px">Ajouter une cave</button></div>`;
+  const th = themeActuel();
+  html += `<div class="card"><h2>Apparence</h2><div class="theme-pick">${[['auto', 'Automatique'], ['etiquette', 'Étiquette'], ['cave', 'Cave']].map(([k, l]) =>
+    `<button type="button" class="chip" data-act="theme" data-id="${k}" aria-pressed="${th === k}">${l}</button>`).join('')}</div>
+    <p class="muted small" style="margin:8px 0 0">Automatique : « Étiquette » le jour, « Cave » quand le téléphone est en mode sombre.</p></div>`;
   html += `<div class="card"><h2>Exports et sauvegardes</h2><div class="row">
     <button class="btn" data-act="export-xlsx">Télécharger en Excel</button>
     ${!LOCAL_MODE && account ? '<button class="btn" data-act="export-xlsx-od">Excel dans OneDrive</button>' : ''}
@@ -666,6 +670,19 @@ function renderBilan() {
   html += `</div>`;
   return html;
 }
+
+/* ---------- Thème ---------- */
+function themeActuel() { return document.documentElement.dataset.theme || 'auto'; }
+function appliquerTheme(t) {
+  if (t === 'auto') delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = t;
+  try { if (t === 'auto') localStorage.removeItem('cave.theme'); else localStorage.setItem('cave.theme', t); } catch (e) { /* sans importance */ }
+  majCouleurBarre();
+}
+function majCouleurBarre() {
+  const m = document.querySelector('meta[name="theme-color"]');
+  if (m) m.content = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#f5efe4';
+}
+matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', majCouleurBarre);
 
 /* ---------- Feuilles (dialogues) ---------- */
 function openSheet(html, onSubmit, vinId = '') {
@@ -1086,6 +1103,7 @@ document.addEventListener('click', e => {
       break;
     }
     case 'photo': choisirPhoto(id); break;
+    case 'theme': appliquerTheme(id); render(); break;
     case 'photo-web': lienPhotoWeb(id); break;
     case 'photo-suppr': {
       const v = vinById(id);
@@ -1156,6 +1174,7 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 /* ---------- Démarrage ---------- */
 (async function start() {
   loadLocal();
+  majCouleurBarre();
   if (LOCAL_MODE) remoteChecked = true;
   render();
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});

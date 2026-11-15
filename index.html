@@ -13,6 +13,10 @@
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icon-180.png">
 <link rel="stylesheet" href="style.css">
+<script>
+  // Thème choisi (étiquette / cave), appliqué avant l'affichage
+  try { var t = localStorage.getItem('cave.theme'); if (t === 'etiquette' || t === 'cave') document.documentElement.dataset.theme = t; } catch (e) {}
+</script>
 </head>
 <body>
 <header class="top">
