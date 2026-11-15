@@ -16,7 +16,7 @@ let data = null;
 let etag = null;
 let dirty = false;
 let rev = 0;
-let ui = { tab: 'cave', cave: 'all', q: '', couleur: '', epuises: false, verif: false, jtype: '' };
+let ui = { tab: 'cave', cave: 'all', q: '', couleur: '', epuises: false, verif: false, incomplet: false, jtype: '' };
 let msalApp = null;
 let account = null;
 let remoteChecked = false;
@@ -143,6 +143,16 @@ function statut(v) {
   if (v.gardeDebut) return { k: 'pret', label: `Prêt depuis ${v.gardeDebut}` };
   return { k: 'inconnu', label: 'Garde à renseigner' };
 }
+// Informations utiles encore vides sur une fiche
+function manquants(v) {
+  const m = [];
+  if (!v.appellation) m.push('appellation');
+  if (!v.region) m.push('région');
+  if (!v.cepages) m.push('cépages');
+  if (!v.gardeDebut && !v.gardeFin) m.push('période de garde');
+  if (!v.photo) m.push('photo');
+  return m;
+}
 function titreVin(v) { return v.cuvee || v.appellation || v.domaine || 'Vin sans nom'; }
 function sousTitre(v) {
   const parts = [v.domaine, v.appellation && v.appellation !== v.cuvee ? v.appellation : ''].filter(Boolean);
@@ -236,7 +246,7 @@ async function putFile(pathEnc, body, contentType, ifMatch) {
   if (ifMatch) h['If-Match'] = ifMatch;
   let r = await gfetch(`/me/drive/root:/${pathEnc}:/content`, { method: 'PUT', headers: h, body });
   if (r.status === 404 || r.status === 409) {
-    await ensureFolder(dossier());
+    await ensureFolder(decodeURIComponent(pathEnc).split('/').slice(0, -1).join('/'));
     r = await gfetch(`/me/drive/root:/${pathEnc}:/content`, { method: 'PUT', headers: h, body });
   }
   if (r.status === 412) return { conflict: true };
@@ -244,6 +254,131 @@ async function putFile(pathEnc, body, contentType, ifMatch) {
   const j = await r.json();
   return { etag: j.eTag };
 }
+
+/* ---------- Photos des bouteilles ----------
+   v.photo peut valoir :
+   - 'od:<chemin>'  photo prise avec l'appli, stockée dans OneDrive (dossier Cave/photos)
+   - 'https://…'    image trouvée sur le web
+   - 'data:…'       photo réduite gardée dans le fichier (mode local ou envoi impossible)
+   v.photoMini : même chose en petit format pour la liste. */
+const PHOTO_CACHE = 'cave-photos';
+const photoUrls = new Map();
+const photoAttente = new Map();
+const dossierPhotos = () => (dossier() ? dossier() + '/' : '') + 'photos';
+const cleCache = chemin => new Request(location.origin + location.pathname.replace(/[^/]*$/, '') + '__photo/' + encodeURIComponent(chemin));
+
+async function urlPhoto(ref) {
+  if (!ref) return '';
+  if (!ref.startsWith('od:')) return ref;
+  if (photoUrls.has(ref)) return photoUrls.get(ref);
+  if (photoAttente.has(ref)) return photoAttente.get(ref);
+  const p = (async () => {
+    const chemin = ref.slice(3);
+    let blob = null;
+    try {
+      const c = await caches.open(PHOTO_CACHE);
+      const r = await c.match(cleCache(chemin));
+      if (r) blob = await r.blob();
+    } catch (e) { /* cache indisponible */ }
+    if (!blob) {
+      if (LOCAL_MODE || !account || !navigator.onLine) return '';
+      const r = await gfetch(`/me/drive/root:/${cheminEnc(chemin)}`);
+      if (!r.ok) return '';
+      const meta = await r.json();
+      const f = await fetch(meta['@microsoft.graph.downloadUrl']);
+      if (!f.ok) return '';
+      blob = await f.blob();
+      try { (await caches.open(PHOTO_CACHE)).put(cleCache(chemin), new Response(blob, { headers: { 'Content-Type': blob.type || 'image/jpeg' } })); } catch (e) { /* sans importance */ }
+    }
+    const u = URL.createObjectURL(blob);
+    photoUrls.set(ref, u);
+    return u;
+  })().catch(() => '').finally(() => photoAttente.delete(ref));
+  photoAttente.set(ref, p);
+  return p;
+}
+// Charge les images (balises <img data-photo>) quand elles arrivent à l'écran
+const photoObs = 'IntersectionObserver' in window ? new IntersectionObserver(entries => {
+  for (const e of entries) if (e.isIntersecting) { photoObs.unobserve(e.target); chargerImg(e.target); }
+}, { rootMargin: '300px' }) : null;
+async function chargerImg(img) {
+  const u = await urlPhoto(img.dataset.photo);
+  if (u) { img.src = u; img.closest('.thumb, .photo-wrap')?.classList.add('ok'); }
+  else img.closest('.thumb, .photo-wrap')?.classList.add('ko');
+}
+function hydraterPhotos(root = document) {
+  $$('img[data-photo]:not([data-vu])', root).forEach(img => {
+    img.dataset.vu = '1';
+    if (photoObs) photoObs.observe(img); else chargerImg(img);
+  });
+}
+function imageDepuisFichier(file) {
+  return new Promise((res, rej) => {
+    const img = new Image();
+    const u = URL.createObjectURL(file);
+    img.onload = () => { URL.revokeObjectURL(u); res(img); };
+    img.onerror = () => { URL.revokeObjectURL(u); rej(new Error('Image illisible')); };
+    img.src = u;
+  });
+}
+function reduire(img, maxCote, qualite) {
+  const k = Math.min(1, maxCote / Math.max(img.naturalWidth, img.naturalHeight));
+  const c = document.createElement('canvas');
+  c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
+  c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+  return new Promise(res => c.toBlob(b => res({ blob: b, dataUrl: () => c.toDataURL('image/jpeg', qualite) }), 'image/jpeg', qualite));
+}
+async function enregistrerPhoto(v, file) {
+  const img = await imageDepuisFichier(file);
+  const grand = await reduire(img, 1400, 0.82);
+  const mini = await reduire(img, 220, 0.7);
+  if (!LOCAL_MODE && account && navigator.onLine) {
+    try {
+      const base = `${dossierPhotos()}/${v.id}-${Date.now().toString(36)}`;
+      await putFile(cheminEnc(base + '.jpg'), grand.blob, 'image/jpeg', null);
+      await putFile(cheminEnc(base + '-mini.jpg'), mini.blob, 'image/jpeg', null);
+      try {
+        const c = await caches.open(PHOTO_CACHE);
+        await c.put(cleCache(base + '.jpg'), new Response(grand.blob, { headers: { 'Content-Type': 'image/jpeg' } }));
+        await c.put(cleCache(base + '-mini.jpg'), new Response(mini.blob, { headers: { 'Content-Type': 'image/jpeg' } }));
+      } catch (e) { /* sans importance */ }
+      return { photo: 'od:' + base + '.jpg', photoMini: 'od:' + base + '-mini.jpg' };
+    } catch (e) {
+      console.error(e);
+      toast('Envoi OneDrive impossible : photo gardée en petit format');
+    }
+  }
+  // Mode local ou hors ligne : version réduite stockée dans le fichier de la cave
+  const moyen = await reduire(img, 640, 0.72);
+  return { photo: moyen.dataUrl(), photoMini: mini.dataUrl() };
+}
+function choisirPhoto(id) {
+  const v = vinById(id);
+  const inp = document.createElement('input');
+  inp.type = 'file'; inp.accept = 'image/*';
+  inp.onchange = async () => {
+    const f = inp.files[0];
+    if (!f) return;
+    toast('Enregistrement de la photo…');
+    try {
+      const r = await enregistrerPhoto(v, f);
+      commit(() => { Object.assign(v, r); v.maj = nowIso(); }, 'Photo enregistrée');
+      ouvrirVin(v.id);
+    } catch (e) { toast('Photo impossible : ' + e.message); }
+  };
+  inp.click();
+}
+function lienPhotoWeb(id) {
+  const v = vinById(id);
+  const actuel = v.photo && /^https?:/.test(v.photo) ? v.photo : '';
+  const u = prompt('Collez le lien d’une image de la bouteille (clic long sur l’image → « Copier l’adresse de l’image »)', actuel);
+  if (u == null) return;
+  const x = u.trim();
+  if (x && !/^https?:\/\/\S+$/.test(x)) { toast('Lien invalide'); return; }
+  commit(() => { v.photo = x; v.photoMini = x; v.maj = nowIso(); }, x ? 'Image enregistrée' : 'Image retirée');
+  ouvrirVin(v.id);
+}
+const rechercheImage = v => 'https://www.google.com/search?tbm=isch&q=' + encodeURIComponent([v.domaine, v.cuvee, v.appellation, v.millesime, 'bouteille'].filter(Boolean).join(' '));
 
 function mergeById(a = [], b = []) {
   const m = new Map();
@@ -330,12 +465,14 @@ function render() {
   renderCaveFilter();
   $$('.tabs button').forEach(b => b.setAttribute('aria-current', b.dataset.tab === ui.tab ? 'page' : 'false'));
   $('#fab').hidden = !(data && ui.tab === 'cave');
+  $('#fabBoire').hidden = !(data && (ui.tab === 'cave' || ui.tab === 'boire'));
   if (!data) { content.innerHTML = renderWelcome(); return; }
   computeStock();
   if (ui.tab === 'cave') renderCave(content);
   else if (ui.tab === 'boire') content.innerHTML = renderBoire();
   else if (ui.tab === 'journal') content.innerHTML = renderJournal();
   else content.innerHTML = renderBilan();
+  hydraterPhotos(content);
 }
 function renderCaveFilter() {
   const el = $('#caveFilter');
@@ -370,10 +507,12 @@ function renderCave(content) {
     $('#q').value = ui.q;
   }
   const verif = vinsActifs().filter(v => v.aVerifier).length;
+  const incompl = vinsActifs().filter(v => qte(v, ui.cave) > 0 && manquants(v).length).length;
   $('#chips').innerHTML = ['', ...COULEURS].filter(c => !c || vinsActifs().some(v => v.couleur === c)).map(c =>
     `<button type="button" class="chip" data-couleur="${esc(c)}" aria-pressed="${ui.couleur === c}">${c || 'Toutes couleurs'}</button>`).join('') +
     `<button type="button" class="chip" data-toggle="epuises" aria-pressed="${ui.epuises}">Épuisés</button>` +
-    (verif ? `<button type="button" class="chip" data-toggle="verif" aria-pressed="${ui.verif}">À vérifier (${verif})</button>` : '');
+    (verif ? `<button type="button" class="chip" data-toggle="verif" aria-pressed="${ui.verif}">À vérifier (${verif})</button>` : '') +
+    (incompl ? `<button type="button" class="chip" data-toggle="incomplet" aria-pressed="${ui.incomplet}">À compléter (${incompl})</button>` : '');
   renderList();
 }
 function filtreVins() {
@@ -384,6 +523,7 @@ function filtreVins() {
     if (!ui.epuises && n <= 0) return false;
     if (ui.couleur && v.couleur !== ui.couleur) return false;
     if (ui.verif && !v.aVerifier) return false;
+    if (ui.incomplet && !manquants(v).length) return false;
     if (words.length) {
       const hay = norm([v.domaine, v.cuvee, v.appellation, v.region, v.millesime, v.cepages, v.couleur, v.format, ...Object.values(v.emplacements || {})].join(' '));
       if (!words.every(w => hay.includes(w))) return false;
@@ -403,7 +543,7 @@ function renderList() {
   const total = list.reduce((a, v) => a + qte(v, ui.cave), 0);
   let html = `<div class="summary">${plural(total, 'bouteille')} · ${plural(list.length, 'vin')}${ui.cave !== 'all' ? ' · ' + esc(caveNom(ui.cave)) : ''}</div>`;
   if (!list.length) {
-    html += `<div class="empty-state">${ui.q || ui.couleur || ui.verif ? 'Aucun vin ne correspond.' : ui.cave !== 'all' ? 'Aucune bouteille dans cette cave pour le moment.' : 'Aucun vin. Ajoutez-en avec le bouton +.'}</div>`;
+    html += `<div class="empty-state">${ui.q || ui.couleur || ui.verif || ui.incomplet ? 'Aucun vin ne correspond.' : ui.cave !== 'all' ? 'Aucune bouteille dans cette cave pour le moment.' : 'Aucun vin. Ajoutez-en avec le bouton +.'}</div>`;
   } else {
     let region = null;
     for (const v of list) {
@@ -416,18 +556,20 @@ function renderList() {
     }
   }
   $('#list').innerHTML = html;
+  hydraterPhotos($('#list'));
 }
 function carteVin(v) {
   const n = qte(v, ui.cave);
   const st = statut(v);
   const loc = emplacementTexte(v);
-  return `<button type="button" class="vin${n <= 0 ? ' empty' : ''}" data-vin="${esc(v.id)}">
-    <span class="dot ${couleurClass(v.couleur)}" title="${esc(v.couleur)}"></span>
+  const mini = v.photoMini || v.photo;
+  return `<div class="vin-wrap"><button type="button" class="vin${n <= 0 ? ' empty' : ''}${n > 0 ? ' has-quick' : ''}" data-vin="${esc(v.id)}">
+    ${mini ? `<span class="thumb ${couleurClass(v.couleur)}"><img data-photo="${esc(mini)}" alt="" decoding="async"></span>` : `<span class="dot ${couleurClass(v.couleur)}" title="${esc(v.couleur)}"></span>`}
     <span class="vin-main"><span class="vin-title">${esc(titreVin(v))}</span>
       <span class="vin-sub" style="display:block">${esc(sousTitre(v))}${v.format && v.format !== 'Bouteille' ? ' · ' + esc(v.format) : ''}</span>
       <span class="vin-meta"><span class="pill s-${st.k}">${esc(st.label)}</span>${v.aVerifier ? '<span class="pill verif">À vérifier</span>' : ''}${loc ? `<span class="loc">📍 ${esc(loc)}</span>` : ''}</span></span>
     <span class="vin-right"><span class="vin-year" style="display:block">${esc(v.millesime || 'NM')}</span><span class="vin-qty">${n}<small>btl</small></span></span>
-  </button>`;
+  </button>${n > 0 ? `<button type="button" class="quick-boire" data-act="boire" data-id="${esc(v.id)}" aria-label="Boire une bouteille de ${esc(nomComplet(v))}">🍷 Bu</button>` : ''}</div>`;
 }
 
 /* ---------- Onglet À boire ---------- */
@@ -451,12 +593,12 @@ function renderBoire() {
 }
 
 /* ---------- Onglet Journal ---------- */
-const TYPES = { entree: ['+', 'Entrée'], sortie: ['−', 'Sortie'], transfert: ['⇄', 'Déplacement'], ajustement: ['±', 'Correction'] };
+const TYPES = { entree: ['+', 'Entrée'], sortie: ['−', 'Sortie'], transfert: ['⇄', 'Déplacement'], ajustement: ['±', 'Correction'], commentaire: ['✎', 'Commentaire'] };
 function renderJournal() {
   let list = mvtsActifs().filter(m => !ui.jtype || m.type === ui.jtype);
   if (ui.cave !== 'all') list = list.filter(m => m.cave === ui.cave || m.caveDest === ui.cave);
   list.sort((a, b) => (b.date || '0').localeCompare(a.date || '0') || (b.maj || '').localeCompare(a.maj || ''));
-  let html = `<div class="chips" style="padding-top:0">${[['', 'Tout'], ['sortie', 'Sorties'], ['entree', 'Entrées'], ['transfert', 'Déplacements'], ['ajustement', 'Corrections']]
+  let html = `<div class="chips" style="padding-top:0">${[['', 'Tout'], ['sortie', 'Sorties'], ['commentaire', 'Commentaires'], ['entree', 'Entrées'], ['transfert', 'Déplacements'], ['ajustement', 'Corrections']]
     .map(([k, l]) => `<button type="button" class="chip" data-jtype="${k}" aria-pressed="${ui.jtype === k}">${l}</button>`).join('')}</div>`;
   if (!list.length) return html + '<div class="empty-state">Aucun mouvement.</div>';
   let mois = null;
@@ -465,6 +607,12 @@ function renderJournal() {
     if (k !== mois) { mois = k; html += `<div class="group-title"><span>${esc(k)}</span></div>`; }
     const v = vinById(m.vinId) || {};
     const [ico] = TYPES[m.type] || ['?'];
+    if (m.type === 'commentaire') {
+      html += `<button type="button" class="mvt" data-mvt="${esc(m.id)}"><span class="ico commentaire">✎</span>
+        <span class="mvt-main"><span class="t" style="display:block">${esc(nomComplet(v))}</span><span class="s" style="display:block">${esc([m.noteSur20 != null ? m.noteSur20 + '/20' : '', m.occasion, m.commentaire].filter(Boolean).join(' · '))}</span></span>
+        <span class="d">${esc(fmtDate(m.date))}</span></button>`;
+      continue;
+    }
     const signe = m.type === 'sortie' ? '−' : m.type === 'entree' ? '+' : m.type === 'ajustement' && m.qte > 0 ? '+' : '';
     const lieu = m.type === 'transfert' ? `${caveNom(m.cave)} → ${caveNom(m.caveDest)}` : caveNom(m.cave);
     const details = [lieu, m.occasion, m.noteSur20 != null ? m.noteSur20 + '/20' : '', m.prix != null ? EUR2.format(m.prix) + '/btl' : '', m.fournisseur, m.note && m.note !== 'Reprise du livre de cave Excel' ? m.note : ''].filter(Boolean).join(' · ');
@@ -550,10 +698,21 @@ function ouvrirVin(id) {
   const st = statut(v);
   const total = qte(v);
   const pm = prixMoyen(v);
-  const mv = mvtsActifs().filter(m => m.vinId === v.id).sort((a, b) => (b.date || '0').localeCompare(a.date || '0'));
+  const tous = mvtsActifs().filter(m => m.vinId === v.id).sort((a, b) => (b.date || '0').localeCompare(a.date || '0') || (b.maj || '').localeCompare(a.maj || ''));
+  const mv = tous.filter(m => m.type !== 'commentaire');
+  const degust = tous.filter(m => m.type === 'commentaire' || (m.type === 'sortie' && (m.commentaire || m.noteSur20 != null || m.occasion)));
+  const nbBues = tous.filter(m => m.type === 'sortie').reduce((a, m) => a + m.qte, 0);
+  const manque = manquants(v);
   const lignes = data.caves.filter(c => qte(v, c.id) !== 0 || (v.emplacements || {})[c.id]).map(c =>
     `<tr><td>${esc(c.nom)}<div class="muted small">${v.emplacements[c.id] ? '📍 ' + esc(v.emplacements[c.id]) : 'Emplacement non renseigné'}</div></td><td class="q">${qte(v, c.id)}</td></tr>`).join('');
   openSheet(`${head(nomComplet(v), [v.domaine, v.appellation, v.region].filter(Boolean).join(' · '))}
+    ${v.photo ? `<div class="photo-wrap ${couleurClass(v.couleur)}"><img data-photo="${esc(v.photo)}" alt="Bouteille ${esc(nomComplet(v))}"></div>` : ''}
+    <div class="row photo-actions">
+      <button class="btn small-btn" data-act="photo" data-id="${v.id}">📷 ${v.photo ? 'Changer la photo' : 'Prendre / choisir une photo'}</button>
+      <button class="btn small-btn" data-act="photo-web" data-id="${v.id}">🔗 Image du web</button>
+      ${v.photo ? `<button class="btn small-btn danger" data-act="photo-suppr" data-id="${v.id}">Retirer</button>` : ''}
+    </div>
+    ${!v.photo || (v.photo && /^https?:/.test(v.photo)) ? `<p class="muted small" style="margin:-4px 0 10px">Pour une image du web : <a href="${esc(rechercheImage(v))}" target="_blank" rel="noopener">chercher la bouteille</a>, copier l'adresse de l'image puis « Image du web ».</p>` : ''}
     ${v.aVerifier ? `<div class="banner">⚠️ ${esc(v.aVerifier)} <button class="btn link" data-act="verifie" data-id="${v.id}">C'est vérifié</button></div>` : ''}
     <div class="vin-meta" style="margin-bottom:12px"><span class="pill s-${st.k}">${esc(st.label)}</span><span class="pill">${esc(v.couleur || 'Couleur ?')}</span>${v.format !== 'Bouteille' ? `<span class="pill">${esc(v.format)}</span>` : ''}</div>
     <div class="row">
@@ -561,11 +720,17 @@ function ouvrirVin(id) {
       <button class="btn" data-act="entree" data-id="${v.id}">+ Ajouter</button>
       ${data.caves.length > 1 ? `<button class="btn" data-act="transfert" data-id="${v.id}" ${total <= 0 ? 'disabled' : ''}>⇄ Déplacer</button>` : ''}
     </div>
+    <div class="section-title">Dégustations & commentaires${nbBues ? ` · ${plural(nbBues, 'bouteille bue', 'bouteilles bues')}` : ''}</div>
+    ${degust.length ? degust.map(carteDegust).join('') : '<p class="muted small">Pas encore de commentaire. Ils s’ajoutent quand vous buvez une bouteille, ou avec le bouton ci-dessous.</p>'}
+    <div class="row" style="margin-top:6px"><button class="btn" data-act="commentaire" data-id="${v.id}">✎ Ajouter un commentaire</button></div>
     <div class="section-title">Stock · ${plural(total, 'bouteille')}</div>
     ${lignes ? `<table class="stock-table">${lignes}</table>` : '<p class="muted small">Aucune bouteille.</p>'}
     <div class="row" style="margin-top:4px"><button class="btn link" data-act="emplacements" data-id="${v.id}">Modifier les emplacements</button><button class="btn link" data-act="corriger" data-id="${v.id}">Corriger le stock</button></div>
     <div class="section-title">Fiche</div>
+    ${manque.filter(x => x !== 'photo').length ? `<div class="banner warn">À compléter : ${esc(manque.filter(x => x !== 'photo').join(', '))} <button class="btn link" data-act="modifier" data-id="${v.id}">Compléter</button></div>` : ''}
     <dl class="info">
+      <dt>Appellation</dt><dd>${esc(v.appellation || '—')}</dd>
+      <dt>Région</dt><dd>${esc(v.region || '—')}</dd>
       <dt>Garde</dt><dd>${v.gardeDebut || v.gardeFin ? `${v.gardeDebut || '?'} → ${v.gardeFin || '?'}` : '—'}</dd>
       <dt>Cépages</dt><dd>${esc(v.cepages || '—')}</dd>
       <dt>Prix d'achat moyen</dt><dd>${pm != null ? EUR2.format(pm) : '—'}</dd>
@@ -573,14 +738,67 @@ function ouvrirVin(id) {
       ${v.notes ? `<dt>Notes</dt><dd>${esc(v.notes)}</dd>` : ''}
     </dl>
     <div class="row" style="margin-top:10px"><button class="btn" data-act="modifier" data-id="${v.id}">Modifier la fiche</button><button class="btn" data-act="millesime" data-id="${v.id}">Autre millésime</button></div>
-    <div class="section-title">Historique</div>
+    <div class="section-title">Mouvements de stock</div>
     ${mv.length ? mv.map(m => {
       const signe = m.type === 'sortie' ? '−' : m.type === 'entree' ? '+' : '';
       const txt = m.type === 'transfert' ? `${caveNom(m.cave)} → ${caveNom(m.caveDest)}` : caveNom(m.cave);
       const det = [m.occasion, m.noteSur20 != null ? m.noteSur20 + '/20' : '', m.prix != null ? EUR2.format(m.prix) : '', m.fournisseur, m.commentaire].filter(Boolean).join(' · ');
       return `<div class="list-plain" style="padding:6px 0;border-top:1px solid var(--line)"><div style="display:flex;justify-content:space-between;gap:8px"><span><b>${signe}${Math.abs(m.qte)}</b> ${esc((TYPES[m.type] || [])[1] || '')} · ${esc(txt)}</span><span class="muted small">${esc(fmtDate(m.date) || 'date ?')}</span></div>${det ? `<div class="muted small">${esc(det)}</div>` : ''}</div>`;
     }).join('') : '<p class="muted small">Aucun mouvement.</p>'}
-    <div style="margin-top:18px"><button class="btn danger" data-act="supprimer-vin" data-id="${v.id}">Supprimer ce vin</button></div>`);
+    <div style="margin-top:18px"><button class="btn danger" data-act="supprimer-vin" data-id="${v.id}">Supprimer ce vin</button></div>`, null, v.id);
+  hydraterPhotos($('#sheetBody'));
+}
+function dateLongue(iso) {
+  if (!iso) return 'Date inconnue';
+  const d = new Date(iso.slice(0, 10) + 'T12:00:00');
+  return isNaN(d) ? iso : d.toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' });
+}
+function carteDegust(m) {
+  const tag = m.type === 'sortie' ? `${plural(m.qte, 'bouteille bue', 'bouteilles bues')}${data.caves.length > 1 ? ' · ' + esc(caveNom(m.cave)) : ''}` : 'Commentaire';
+  return `<div class="degust"><div class="degust-head"><span class="degust-date">${esc(dateLongue(m.date))}</span>${m.noteSur20 != null ? `<span class="note">${m.noteSur20}/20</span>` : ''}</div>
+    <div class="muted small">${tag}${m.occasion ? ' · ' + esc(m.occasion) : ''}</div>
+    ${m.commentaire ? `<p class="degust-txt">${esc(m.commentaire)}</p>` : ''}
+    <button class="btn link" data-act="edit-commentaire" data-id="${esc(m.id)}">Modifier</button></div>`;
+}
+// Ajout ou modification d'un commentaire daté (sans changer le stock)
+function formCommentaire(vinId, mvtId) {
+  const m = mvtId ? data.mouvements.find(x => x.id === mvtId) : null;
+  const v = vinById(m ? m.vinId : vinId);
+  const estSortie = m && m.type === 'sortie';
+  openSheet(`${head(m ? 'Modifier le commentaire' : 'Ajouter un commentaire', nomComplet(v))}<form class="f">
+    ${estSortie ? `<p class="muted small" style="margin:0">Sortie de ${plural(m.qte, 'bouteille')} · le stock n'est pas modifié ici.</p>` : '<p class="muted small" style="margin:0">Un commentaire seul ne retire aucune bouteille du stock (bouteille bue chez des amis, notes d’un salon…).</p>'}
+    <div class="two"><label>Date de consommation<input type="date" name="date" value="${esc((m && m.date) || today())}" required></label>
+    <label>Note /20<input type="number" name="noteSur20" min="0" max="20" step="0.5" inputmode="decimal" value="${esc(m && m.noteSur20 != null ? m.noteSur20 : '')}"></label></div>
+    <label>Occasion<input name="occasion" value="${esc((m && m.occasion) || '')}" placeholder="Dîner, anniversaire, avec…"></label>
+    <label>Commentaire<textarea name="commentaire" rows="4" placeholder="Nez, bouche, accord, à racheter ?">${esc((m && m.commentaire) || '')}</textarea></label>
+    <button class="btn primary">Enregistrer</button>
+    ${m && !estSortie ? `<button type="button" class="btn danger" data-act="suppr-commentaire" data-id="${esc(m.id)}">Supprimer ce commentaire</button>` : ''}</form>`, fd => {
+    const champs = { date: fd.date, noteSur20: num(fd.noteSur20), occasion: fd.occasion.trim(), commentaire: fd.commentaire.trim(), maj: nowIso() };
+    if (!m && !champs.commentaire && champs.noteSur20 == null) { toast('Écrivez un commentaire ou une note'); return false; }
+    commit(() => {
+      if (m) Object.assign(m, champs);
+      else data.mouvements.push({ id: uid('m'), vinId: v.id, type: 'commentaire', qte: 0, cave: ui.cave !== 'all' ? ui.cave : data.caves[0].id, ...champs });
+    }, 'Commentaire enregistré');
+    setTimeout(() => ouvrirVin(v.id), 0);
+  }, v.id);
+}
+// Saisie rapide « J'ai bu » : recherche puis sortie d'une bouteille
+function choisirVinBu() {
+  openSheet(`${head('J’ai bu une bouteille', 'Cherchez le vin, puis touchez-le')}
+    <div class="search"><input id="qb" type="search" placeholder="Domaine, cuvée, millésime…" autocomplete="off"></div>
+    <div id="qbList" style="margin-top:10px"></div>`);
+  listeVinBu('');
+  setTimeout(() => $('#qb')?.focus(), 50);
+}
+function listeVinBu(q) {
+  computeStock();
+  const words = norm(q).trim().split(/\s+/).filter(Boolean);
+  const l = trierVins(vinsActifs().filter(v => qte(v, ui.cave) > 0 && words.every(w => norm([v.domaine, v.cuvee, v.appellation, v.region, v.millesime, v.couleur].join(' ')).includes(w))));
+  $('#qbList').innerHTML = l.length ? l.slice(0, 60).map(v => `<button type="button" class="pick" data-act="boire" data-id="${esc(v.id)}">
+    ${v.photoMini || v.photo ? `<span class="thumb sm ${couleurClass(v.couleur)}"><img data-photo="${esc(v.photoMini || v.photo)}" alt=""></span>` : `<span class="dot ${couleurClass(v.couleur)}"></span>`}
+    <span class="vin-main"><span class="vin-title">${esc(titreVin(v))} ${esc(v.millesime || '')}</span><span class="vin-sub" style="display:block">${esc(sousTitre(v))}</span></span>
+    <span class="muted small">${qte(v, ui.cave)} btl</span></button>`).join('') : '<p class="empty-state">Aucun vin en stock ne correspond.</p>';
+  hydraterPhotos($('#qbList'));
 }
 
 function cavesAvecStock(v) { return data.caves.filter(c => qte(v, c.id) > 0); }
@@ -588,20 +806,23 @@ function caveParDefaut(list) { return list.find(c => c.id === ui.cave) || list[0
 
 function formBoire(id) {
   const v = vinById(id);
+  const d = $('#sheet');
+  const depuisFiche = d.open && d.dataset.vin === id && !!$('#sheetBody [data-act="commentaire"]');
   const caves = cavesAvecStock(v);
   const def = caveParDefaut(caves);
   openSheet(`${head('Boire', nomComplet(v))}<form class="f">
     ${caves.length > 1 ? `<label>Cave<select name="cave">${options(caves.map(c => [c.id, `${c.nom} (${qte(v, c.id)})`]), def.id)}</select></label>` : `<input type="hidden" name="cave" value="${esc(def.id)}"><p class="muted small" style="margin:0">${esc(def.nom)} · ${qte(v, def.id)} en stock</p>`}
     <label>Nombre de bouteilles${stepper('qte', 1, 1, qte(v, def.id))}</label>
-    <div class="two"><label>Date<input type="date" name="date" value="${today()}" required></label><label>Note /20<input type="number" name="noteSur20" min="0" max="20" step="0.5" inputmode="decimal"></label></div>
+    <div class="two"><label>Date de consommation<input type="date" name="date" value="${today()}" required></label><label>Note /20<input type="number" name="noteSur20" min="0" max="20" step="0.5" inputmode="decimal"></label></div>
+    <label>Commentaire de dégustation<textarea name="commentaire" rows="3" placeholder="Facultatif : vous pourrez l'ajouter plus tard depuis la fiche"></textarea></label>
     <label>Occasion<input name="occasion" placeholder="Dîner, anniversaire, offert à…"></label>
-    <label>Commentaire de dégustation<textarea name="commentaire"></textarea></label>
-    <button class="btn primary">Enregistrer la sortie</button></form>`, fd => {
+    <button class="btn primary">🍷 Enregistrer</button></form>`, fd => {
     const q = int(fd.qte);
     const dispo = qte(v, fd.cave);
     if (!q || q < 1 || q > dispo) { toast(`Quantité invalide (${dispo} en stock)`); return false; }
     commit(() => data.mouvements.push({ id: uid('m'), vinId: v.id, type: 'sortie', date: fd.date, qte: q, cave: fd.cave, occasion: fd.occasion.trim(), noteSur20: num(fd.noteSur20), commentaire: fd.commentaire.trim(), maj: nowIso() }),
       `${plural(q, 'bouteille')} sortie${q > 1 ? 's' : ''} · santé !`);
+    if (depuisFiche) setTimeout(() => ouvrirVin(v.id), 0);
   }, v.id);
 }
 function formEntree(id) {
@@ -720,6 +941,7 @@ function formVin(id, mode) {
 }
 function ouvrirMvt(id) {
   const m = data.mouvements.find(x => x.id === id);
+  if (m.type === 'commentaire') { formCommentaire(null, m.id); return; }
   const v = vinById(m.vinId) || {};
   const [, lab] = TYPES[m.type] || ['', ''];
   openSheet(`${head(`${lab} · ${Math.abs(m.qte)} btl`, nomComplet(v))}
@@ -728,7 +950,7 @@ function ouvrirMvt(id) {
     ${m.prix != null ? `<dt>Prix</dt><dd>${EUR2.format(m.prix)} / btl</dd>` : ''}${m.fournisseur ? `<dt>Fournisseur</dt><dd>${esc(m.fournisseur)}</dd>` : ''}
     ${m.occasion ? `<dt>Occasion</dt><dd>${esc(m.occasion)}</dd>` : ''}${m.noteSur20 != null ? `<dt>Note</dt><dd>${m.noteSur20}/20</dd>` : ''}
     ${m.commentaire ? `<dt>Commentaire</dt><dd>${esc(m.commentaire)}</dd>` : ''}${m.note ? `<dt>Remarque</dt><dd>${esc(m.note)}</dd>` : ''}</dl>
-    <div class="row" style="margin-top:16px"><button class="btn" data-act="voir-vin" data-id="${esc(v.id || '')}">Voir le vin</button><button class="btn danger" data-act="annuler-mvt" data-id="${m.id}">Annuler ce mouvement</button></div>`);
+    <div class="row" style="margin-top:16px">${m.type === 'sortie' ? `<button class="btn" data-act="edit-commentaire" data-id="${m.id}">✎ Commentaire</button>` : ''}<button class="btn" data-act="voir-vin" data-id="${esc(v.id || '')}">Voir le vin</button><button class="btn danger" data-act="annuler-mvt" data-id="${m.id}">Annuler ce mouvement</button></div>`);
 }
 
 /* ---------- Import / export ---------- */
@@ -742,7 +964,31 @@ function choisirFichier() {
   };
   inp.click();
 }
+// Fichier de compléments : { "complements": [ { "id": "…", "cepages": "…", "gardeFin": 2030, … } ] }
+// Seuls les champs de la fiche sont modifiés ; le stock et l'historique ne bougent pas.
+const CHAMPS_COMPLEMENT = ['domaine', 'cuvee', 'appellation', 'region', 'couleur', 'millesime', 'cepages', 'gardeDebut', 'gardeFin', 'prixEstime', 'notes', 'photo', 'photoMini'];
+function importerComplements(liste) {
+  if (!data) { toast('Chargez d’abord votre cave'); return; }
+  let n = 0;
+  const ok = liste.filter(c => c && vinById(c.id));
+  if (!ok.length) { toast('Aucune fiche correspondante dans ce fichier'); return; }
+  if (!confirm(`Compléter ${plural(ok.length, 'fiche')} avec ce fichier ? Les champs déjà remplis à la main sont conservés.`)) return;
+  commit(() => {
+    for (const c of ok) {
+      const v = vinById(c.id);
+      let change = false;
+      for (const k of CHAMPS_COMPLEMENT) {
+        if (!(k in c) || c[k] === '' || c[k] == null) continue;
+        if (v[k] !== '' && v[k] != null && !c.forcer) continue;
+        v[k] = c[k]; change = true;
+      }
+      if (change) { v.maj = nowIso(); n++; }
+    }
+  }, '');
+  toast(`${plural(n, 'fiche complétée', 'fiches complétées')}`);
+}
 function importerDonnees(obj) {
+  if (obj && Array.isArray(obj.complements)) { importerComplements(obj.complements); return; }
   const d = normalize(obj);
   if (data && vinsActifs().length && !confirm(`Remplacer la cave actuelle (${vinsActifs().length} vins) par le fichier importé (${d.vins.length} vins) ?`)) return;
   const now = nowIso();
@@ -818,6 +1064,7 @@ document.addEventListener('click', e => {
   if (t.dataset.vin) { ouvrirVin(t.dataset.vin); return; }
   if (t.dataset.mvt) { ouvrirMvt(t.dataset.mvt); return; }
   if (t.id === 'fab') { formVin(null, 'new'); return; }
+  if (t.id === 'fabBoire') { choisirVinBu(); return; }
   if (t.id === 'syncBtn') { if (syncMsg) toast(syncMsg); if (account) sync(); return; }
   const id = t.dataset.id;
   switch (t.dataset.act) {
@@ -828,6 +1075,25 @@ document.addEventListener('click', e => {
     case 'import': choisirFichier(); break;
     case 'vide': data = emptyData(); commit(() => {}, 'Cave créée'); break;
     case 'boire': formBoire(id); break;
+    case 'boire-rapide': choisirVinBu(); break;
+    case 'commentaire': formCommentaire(id); break;
+    case 'edit-commentaire': formCommentaire(null, id); break;
+    case 'suppr-commentaire': {
+      const m = data.mouvements.find(x => x.id === id);
+      if (!confirm('Supprimer ce commentaire ?')) break;
+      commit(() => { m.supprime = true; m.maj = nowIso(); }, 'Commentaire supprimé');
+      ouvrirVin(m.vinId);
+      break;
+    }
+    case 'photo': choisirPhoto(id); break;
+    case 'photo-web': lienPhotoWeb(id); break;
+    case 'photo-suppr': {
+      const v = vinById(id);
+      if (!confirm('Retirer la photo de cette bouteille ?')) break;
+      commit(() => { v.photo = ''; v.photoMini = ''; v.maj = nowIso(); }, 'Photo retirée');
+      ouvrirVin(id);
+      break;
+    }
     case 'entree': formEntree(id); break;
     case 'transfert': formTransfert(id); break;
     case 'corriger': formCorriger(id); break;
@@ -873,6 +1139,7 @@ document.addEventListener('click', e => {
 });
 document.addEventListener('input', e => {
   if (e.target.id === 'q') { ui.q = e.target.value; renderList(); }
+  if (e.target.id === 'qb') { listeVinBu(e.target.value); return; }
   // Quantité maximale = stock de la cave choisie (sortie, déplacement)
   const vinId = $('#sheet').dataset.vin;
   if (e.target.name === 'cave' && e.target.form && vinId) {
