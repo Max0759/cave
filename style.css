@@ -391,3 +391,55 @@ a { color: var(--accent); }
 /* Sélecteur de thème */
 .theme-pick { display: flex; gap: 6px; }
 .theme-pick .chip { flex: 1; text-align: center; padding: 8px 10px; }
+
+/* Scan d'étiquette */
+.scan-apercu { position: relative; border-radius: 12px; overflow: hidden; background: var(--surface-2); max-height: 340px; display: grid; place-items: center; margin-bottom: 10px; }
+.scan-apercu img { max-width: 100%; max-height: 340px; object-fit: contain; display: block; }
+.scan-onde { position: absolute; left: 0; right: 0; height: 3px; background: linear-gradient(90deg, transparent, var(--gold), transparent); animation: balaye 1.6s ease-in-out infinite; }
+@keyframes balaye { 0% { top: 5%; } 50% { top: 92%; } 100% { top: 5%; } }
+.scan-lu { display: flex; gap: 12px; align-items: flex-start; padding: 10px; border: 1px solid var(--line); border-radius: 12px; margin-bottom: 12px; background: var(--surface-2); }
+.scan-lu img { width: 64px; height: 96px; object-fit: cover; border-radius: 8px; flex: none; }
+.scan-match { border: 1px solid var(--line); border-radius: 12px; padding: 8px 10px 4px; margin-bottom: 10px; }
+.scan-match.best { border-color: var(--gold); box-shadow: 0 0 0 1px var(--gold) inset; }
+.scan-match .pick { border: 0; padding: 4px 0 8px; background: none; margin: 0; }
+.scan-match .row { margin-bottom: 4px; }
+.check { display: flex; gap: 8px; align-items: center; font-size: 13.5px; color: var(--muted); margin: 6px 2px; }
+
+/* Analyse : couleurs des séries validées (clair / sombre) */
+:root { --serie-bu: #a3304a; --serie-stock: #b98320; }
+:root[data-theme="cave"] { --serie-bu: #c94a66; --serie-stock: #b5871f; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="etiquette"]) { --serie-bu: #c94a66; --serie-stock: #b5871f; } }
+.tabs { grid-template-columns: repeat(5, 1fr); }
+.kpis { grid-template-columns: repeat(2, 1fr); }
+.kpi b { font-size: 24px; }
+.chart-mois { display: grid; grid-template-columns: repeat(var(--n), 1fr); gap: 2px; height: 150px; align-items: end; padding-top: 6px; border-bottom: 1px solid var(--line); }
+.chart-mois .col { height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; position: relative; outline: none; }
+.chart-mois .col:hover .bar, .chart-mois .col:focus .bar { filter: brightness(1.15); }
+.chart-mois .bar { display: block; width: min(70%, 22px); min-height: 0; background: var(--serie-bu); border-radius: 4px 4px 0 0; }
+.chart-mois .x { position: absolute; bottom: -20px; font-size: 10.5px; color: var(--muted); white-space: nowrap; }
+.axe-note { margin-top: 24px; text-align: right; }
+.legende { display: flex; gap: 14px; font-size: 12.5px; color: var(--muted); margin-bottom: 10px; }
+.legende .sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+.sw.bu, .hb.bu { background: var(--serie-bu); } .sw.st, .hb.st { background: var(--serie-stock); }
+.chart-tranches { display: grid; gap: 10px; }
+.tr-row { display: grid; grid-template-columns: 88px 1fr 40px; gap: 8px; align-items: center; font-size: 12.5px; }
+.tr-lib { color: var(--muted); }
+.tr-bars { display: grid; gap: 2px; }
+.hb { display: block; height: 9px; border-radius: 0 4px 4px 0; min-width: 2px; }
+.tr-val { font-size: 11px; color: var(--muted); text-align: right; line-height: 1.15; font-variant-numeric: tabular-nums; }
+details.tableau { margin-top: 10px; font-size: 13px; }
+details.tableau summary { color: var(--accent); cursor: pointer; font-weight: 600; }
+details.tableau table, .t-analyse { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 13.5px; }
+details.tableau td, details.tableau th, .t-analyse td, .t-analyse th { padding: 6px 4px; border-top: 1px solid var(--line); text-align: right; font-variant-numeric: tabular-nums; }
+details.tableau td:first-child, details.tableau th:first-child, .t-analyse td:first-child, .t-analyse th:first-child { text-align: left; }
+.t-analyse th, details.tableau th { color: var(--muted); font-weight: 500; font-size: 12px; border-top: 0; }
+.t-analyse .btn.link { padding: 0; text-align: left; font-weight: 600; }
+.nuage { width: 100%; height: auto; display: block; }
+.nuage .grille { stroke: var(--line); stroke-width: 1; }
+.nuage .ax { fill: var(--muted); font-size: 10px; font-family: var(--sans); }
+.nuage .pt { fill: var(--serie-bu); stroke: var(--surface); stroke-width: 2; cursor: pointer; }
+.nuage .pt:hover { r: 7; }
+ol.rq { margin: 0; padding-left: 20px; display: grid; gap: 4px; }
+ol.rq .btn.link { padding: 0; }
+.tip { position: fixed; z-index: 200; pointer-events: none; background: var(--text); color: var(--bg); font-size: 12.5px; padding: 6px 9px; border-radius: 8px; opacity: 0; transition: opacity .12s; max-width: 240px; line-height: 1.35; }
+.tip.show { opacity: 1; }

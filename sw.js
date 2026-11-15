@@ -1,6 +1,6 @@
 // Service worker : permet d'ouvrir l'appli sans réseau (à la cave).
 // Les données ne passent jamais par ce cache : seulement les fichiers de l'appli.
-const VERSION = 'cave-v3';
+const VERSION = 'cave-v4';
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'config.js', 'manifest.webmanifest', 'icon.svg', 'icon-192.png', 'icon-512.png', 'icon-180.png',
   'https://cdn.jsdelivr.net/npm/@azure/msal-browser@3.27.0/lib/msal-browser.min.js'];
 

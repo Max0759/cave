@@ -1,0 +1,12 @@
+# Relais entre l'appli « Ma Cave » et l'API Claude (lecture des étiquettes).
+# Secrets à définir (jamais dans ce fichier) :
+#   npx wrangler secret put ANTHROPIC_API_KEY
+#   npx wrangler secret put CAVE_CODE        (code d'accès saisi une fois dans l'appli)
+name = "cave-etiquette"
+main = "src/index.js"
+compatibility_date = "2025-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+# Adresse de l'appli autorisée à appeler ce relais
+ORIGINE_AUTORISEE = "https://max0759.github.io"

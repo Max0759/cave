@@ -16,7 +16,7 @@ let data = null;
 let etag = null;
 let dirty = false;
 let rev = 0;
-let ui = { tab: 'cave', cave: 'all', q: '', couleur: '', epuises: false, verif: false, incomplet: false, jtype: '' };
+let ui = { tab: 'cave', cave: 'all', q: '', couleur: '', epuises: false, verif: false, incomplet: false, jtype: '', periode: '12m' };
 let msalApp = null;
 let account = null;
 let remoteChecked = false;
@@ -378,6 +378,138 @@ function lienPhotoWeb(id) {
   commit(() => { v.photo = x; v.photoMini = x; v.maj = nowIso(); }, x ? 'Image enregistrée' : 'Image retirée');
   ouvrirVin(v.id);
 }
+/* ---------- Lecture d'étiquette par IA ---------- */
+// L'appli envoie la photo au relais (Cloudflare Worker, dossier worker/) qui interroge Claude.
+const IA = {
+  url: () => { try { return localStorage.getItem('cave.iaUrl') || CFG.iaUrl || ''; } catch (e) { return CFG.iaUrl || ''; } },
+  code: () => { try { return localStorage.getItem('cave.iaCode') || ''; } catch (e) { return ''; } },
+  prete: () => !!(IA.url() && IA.code())
+};
+let scan = null; // { file, apercu, lu, resultats }
+const MOTS_VIDES = new Set(['domaine', 'dom', 'chateau', 'ch', 'clos', 'de', 'du', 'des', 'la', 'le', 'les', 'et', 'en', 'cuvee', 'vin', 'vins', 'aoc', 'aop', 'igp', 'appellation', 'controlee', 'protegee', 'mis', 'bouteille', 'au', 'a', 'l', 'd']);
+const motsCles = t => norm(t).replace(/[^a-z0-9]+/g, ' ').split(' ').filter(w => w.length > 1 && !MOTS_VIDES.has(w));
+function recouvrement(a, b) {
+  const A = motsCles(a), B = new Set(motsCles(b));
+  if (!A.length || !B.size) return 0;
+  return A.filter(w => B.has(w) || [...B].some(x => x.length > 3 && w.length > 3 && (x.startsWith(w) || w.startsWith(x)))).length / Math.max(A.length, B.size);
+}
+function scoreVin(v, lu) {
+  const texteVin = [v.domaine, v.cuvee, v.appellation].join(' ');
+  const texteLu = [lu.domaine, lu.cuvee, lu.appellation, lu.texteLu].join(' ');
+  let s = 3 * recouvrement(lu.domaine, v.domaine) + 2 * recouvrement(lu.cuvee || lu.appellation, v.cuvee || v.appellation) + 1 * recouvrement(lu.appellation, v.appellation) + 2 * recouvrement(texteVin, texteLu);
+  if (lu.millesime && v.millesime) s += lu.millesime === v.millesime ? 2 : -1.5;
+  if (lu.couleur && v.couleur && lu.couleur !== v.couleur) s -= 1;
+  if (lu.format && v.format && lu.format !== v.format) s -= 0.5;
+  return s;
+}
+function chercherCorrespondances(lu) {
+  computeStock();
+  return vinsActifs().map(v => ({ v, s: scoreVin(v, lu) })).filter(x => x.s >= 2).sort((a, b) => b.s - a.s || qte(b.v) - qte(a.v)).slice(0, 4);
+}
+async function imageVersBase64(file) {
+  const img = await imageDepuisFichier(file);
+  const r = await reduire(img, 1568, 0.85);
+  const u = r.dataUrl();
+  return { data: u.slice(u.indexOf(',') + 1), apercu: u };
+}
+function scannerEtiquette() {
+  if (!IA.prete()) {
+    openSheet(`${head('Lecture des étiquettes', 'À configurer une fois')}
+      <p>Pour reconnaître une bouteille en photo, l'appli utilise l'IA Claude via un petit relais à installer une seule fois (voir le fichier <code>worker/LISEZMOI.md</code>).</p>
+      <p class="muted small">Ensuite, renseignez l'adresse du relais et votre code d'accès dans <b>Bilan → Lecture des étiquettes</b>.</p>
+      <div class="row"><button class="btn primary" data-act="ia-reglages">Ouvrir les réglages</button><button class="btn" data-act="boire-rapide">Chercher le vin à la main</button></div>`);
+    return;
+  }
+  const inp = document.createElement('input');
+  inp.type = 'file'; inp.accept = 'image/*'; inp.setAttribute('capture', 'environment');
+  inp.onchange = () => { if (inp.files[0]) analyserPhoto(inp.files[0]); };
+  inp.click();
+}
+async function analyserPhoto(file) {
+  if (!navigator.onLine) { toast('Pas de réseau : cherchez le vin à la main'); choisirVinBu(); return; }
+  let b64;
+  try { b64 = await imageVersBase64(file); } catch (e) { toast('Photo illisible'); return; }
+  scan = { file, apercu: b64.apercu, lu: null, resultats: [] };
+  openSheet(`${head('Lecture de l’étiquette…')}<div class="scan-apercu"><img src="${b64.apercu}" alt=""><div class="scan-onde"></div></div>
+    <p class="muted small" style="text-align:center">L'IA lit l'étiquette, quelques secondes…</p>`);
+  try {
+    const r = await fetch(IA.url(), { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Cave-Code': IA.code() }, body: JSON.stringify({ image: b64.data, type: 'image/jpeg' }) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.erreur || 'Erreur ' + r.status);
+    scan.lu = j.vin;
+  } catch (e) {
+    openSheet(`${head('Lecture impossible')}<p>${esc(e.message === 'Failed to fetch' ? 'Relais injoignable (adresse incorrecte ou pas de réseau).' : e.message)}</p>
+      <div class="row"><button class="btn primary" data-act="scanner">Réessayer</button><button class="btn" data-act="boire-rapide">Chercher à la main</button></div>`);
+    return;
+  }
+  if (!scan.lu.estEtiquette) {
+    openSheet(`${head('Pas d’étiquette reconnue')}<div class="scan-apercu"><img src="${scan.apercu}" alt=""></div><p>Cadrez l'étiquette de face, bien éclairée, puis réessayez.</p>
+      <div class="row"><button class="btn primary" data-act="scanner">Reprendre la photo</button><button class="btn" data-act="boire-rapide">Chercher à la main</button></div>`);
+    return;
+  }
+  scan.resultats = chercherCorrespondances(scan.lu);
+  afficherScan();
+}
+function nomLu(lu) { return [lu.domaine, lu.cuvee && lu.cuvee !== lu.domaine ? lu.cuvee : '', lu.appellation && lu.appellation !== lu.cuvee ? lu.appellation : ''].filter(Boolean).join(' · ') || 'Vin non identifié'; }
+function complementsPossibles(v, lu) {
+  const c = {};
+  for (const k of ['appellation', 'region', 'cepages', 'gardeDebut', 'gardeFin']) if ((v[k] === '' || v[k] == null) && lu[k]) c[k] = lu[k];
+  if (v.prixEstime == null && lu.prixIndicatif) c.prixEstime = lu.prixIndicatif;
+  return c;
+}
+const LIB_CHAMPS = { appellation: 'appellation', region: 'région', cepages: 'cépages', gardeDebut: 'garde dès', gardeFin: 'garde jusqu’à', prixEstime: 'prix indicatif' };
+function afficherScan() {
+  const { lu, resultats } = scan;
+  computeStock();
+  const top = resultats[0];
+  const sur = top && top.s >= 6 && (!lu.millesime || top.v.millesime === lu.millesime);
+  const cartes = resultats.map(({ v }, i) => {
+    const n = qte(v);
+    const compl = complementsPossibles(v, lu);
+    const nbC = Object.keys(compl).length;
+    const memeMill = !lu.millesime || !v.millesime || v.millesime === lu.millesime;
+    return `<div class="scan-match${i === 0 && sur ? ' best' : ''}">
+      <button type="button" class="pick" data-vin="${esc(v.id)}">
+        ${v.photoMini || v.photo ? `<span class="thumb sm ${couleurClass(v.couleur)}"><img data-photo="${esc(v.photoMini || v.photo)}" alt=""></span>` : `<span class="dot ${couleurClass(v.couleur)}"></span>`}
+        <span class="vin-main"><span class="vin-title">${esc(titreVin(v))} ${esc(v.millesime || 'NM')}</span><span class="vin-sub" style="display:block">${esc(sousTitre(v))}${memeMill ? '' : ' · <b>autre millésime</b>'}</span></span>
+        <span class="muted small">${n} btl</span></button>
+      <div class="row">
+        <button class="btn primary" data-act="scan-boire" data-id="${esc(v.id)}" ${n <= 0 ? 'disabled' : ''}>🍷 Bu (−1)</button>
+        <button class="btn" data-act="scan-ajouter" data-id="${esc(v.id)}">+ Ajouter</button>
+      </div>
+      ${nbC ? `<button class="btn link" data-act="scan-completer" data-id="${esc(v.id)}">Compléter la fiche : ${esc(Object.keys(compl).map(k => LIB_CHAMPS[k]).join(', '))}</button>` : ''}
+    </div>`;
+  }).join('');
+  openSheet(`${head(sur ? 'Bouteille reconnue' : resultats.length ? 'Est-ce l’un de ces vins ?' : 'Vin absent de la cave')}
+    <div class="scan-lu"><img src="${scan.apercu}" alt=""><div><div class="vin-title">${esc(nomLu(lu))}</div>
+      <div class="muted small">${esc([lu.millesime || 'Millésime non lu', lu.couleur, lu.region, lu.format !== 'Bouteille' ? lu.format : ''].filter(Boolean).join(' · '))}</div>
+      ${lu.cepages ? `<div class="muted small">${esc(lu.cepages)}${lu.gardeFin ? ` · garde ${lu.gardeDebut || '?'}–${lu.gardeFin}` : ''}${lu.prixIndicatif ? ' · ~' + EUR.format(lu.prixIndicatif) : ''}</div>` : ''}
+      ${lu.remarque ? `<div class="muted small"><i>${esc(lu.remarque)}</i></div>` : ''}</div></div>
+    ${cartes}
+    <label class="check"><input type="checkbox" id="scanPhoto" checked> Utiliser cette photo pour la fiche (si elle n'en a pas)</label>
+    <div class="row" style="margin-top:6px"><button class="btn" data-act="scan-nouveau">➕ Nouveau vin à partir de l'étiquette</button></div>
+    <div class="row"><button class="btn link" data-act="boire-rapide">Pas dans la liste ? Chercher à la main</button><button class="btn link" data-act="scanner">Reprendre la photo</button></div>`);
+  hydraterPhotos($('#sheetBody'));
+}
+async function photoScanSurFiche(v) {
+  const coche = $('#scanPhoto');
+  if (!scan || !scan.file || v.photo || (coche && !coche.checked)) return;
+  const file = scan.file; scan.file = null;
+  try { const r = await enregistrerPhoto(v, file); commit(() => { Object.assign(v, r); v.maj = nowIso(); }); } catch (e) { /* la photo est facultative */ }
+}
+
+function formIaReglages() {
+  openSheet(`${head('Lecture des étiquettes (IA)')}<form class="f">
+    <p class="muted small" style="margin:0">Adresse du relais Cloudflare et code d'accès choisis lors de l'installation (voir <code>worker/LISEZMOI.md</code>). Ils restent sur cet appareil.</p>
+    <label>Adresse du relais<input name="url" type="url" value="${esc(IA.url())}" placeholder="https://cave-etiquette.xxx.workers.dev" inputmode="url" autocomplete="off"></label>
+    <label>Code d'accès<input name="code" type="password" value="${esc(IA.code())}" autocomplete="off"></label>
+    <button class="btn primary">Enregistrer</button></form>`, fd => {
+    try { localStorage.setItem('cave.iaUrl', fd.url.trim()); localStorage.setItem('cave.iaCode', fd.code.trim()); } catch (e) { toast('Impossible d’enregistrer'); return false; }
+    toast(IA.prete() ? 'Lecture des étiquettes prête' : 'Réglages enregistrés');
+    render();
+  });
+}
+
 const rechercheImage = v => 'https://www.google.com/search?tbm=isch&q=' + encodeURIComponent([v.domaine, v.cuvee, v.appellation, v.millesime, 'bouteille'].filter(Boolean).join(' '));
 
 function mergeById(a = [], b = []) {
@@ -465,12 +597,13 @@ function render() {
   renderCaveFilter();
   $$('.tabs button').forEach(b => b.setAttribute('aria-current', b.dataset.tab === ui.tab ? 'page' : 'false'));
   $('#fab').hidden = !(data && ui.tab === 'cave');
-  $('#fabBoire').hidden = !(data && (ui.tab === 'cave' || ui.tab === 'boire'));
+  $('#fabScan').hidden = !(data && (ui.tab === 'cave' || ui.tab === 'boire'));
   if (!data) { content.innerHTML = renderWelcome(); return; }
   computeStock();
   if (ui.tab === 'cave') renderCave(content);
   else if (ui.tab === 'boire') content.innerHTML = renderBoire();
   else if (ui.tab === 'journal') content.innerHTML = renderJournal();
+  else if (ui.tab === 'analyse') content.innerHTML = renderAnalyse();
   else content.innerHTML = renderBilan();
   hydraterPhotos(content);
 }
@@ -623,6 +756,140 @@ function renderJournal() {
   return html;
 }
 
+/* ---------- Onglet Analyse : consommation et tarifs ---------- */
+const TRANCHES = [[0, 10, 'Moins de 10 €'], [10, 20, '10 – 20 €'], [20, 40, '20 – 40 €'], [40, 80, '40 – 80 €'], [80, Infinity, '80 € et plus']];
+const trancheDe = p => p == null ? -1 : TRANCHES.findIndex(([a, b]) => p >= a && p < b);
+const prixRef = v => prixMoyen(v) ?? v.prixEstime ?? null; // prix d'achat, sinon valeur estimée
+function debutPeriode() {
+  const d = new Date();
+  if (ui.periode === '12m') { d.setMonth(d.getMonth() - 11, 1); return d.toISOString().slice(0, 7) + '-01'; }
+  if (ui.periode === 'annee') return d.getFullYear() + '-01-01';
+  return '0000';
+}
+const EUR0 = n => EUR.format(Math.round(n));
+function renderAnalyse() {
+  const c = ui.cave;
+  const deb = debutPeriode();
+  const sorties = mvtsActifs().filter(m => m.type === 'sortie' && (c === 'all' || m.cave === c) && (m.date || '') >= deb);
+  const nbBues = sorties.reduce((a, m) => a + m.qte, 0);
+  let html = `<div class="chips" style="padding-top:0">${[['12m', '12 derniers mois'], ['annee', 'Année ' + YEAR()], ['tout', 'Depuis le début']]
+    .map(([k, l]) => `<button type="button" class="chip" data-periode="${k}" aria-pressed="${ui.periode === k}">${l}</button>`).join('')}</div>`;
+  if (!nbBues) return html + '<div class="empty-state">Aucune bouteille bue sur cette période. Les sorties enregistrées avec « Bu » apparaîtront ici.</div>';
+
+  // Valeurs
+  let valeurBue = 0, qPrixBu = 0;
+  for (const m of sorties) { const p = prixRef(vinById(m.vinId) || {}); if (p != null) { valeurBue += p * m.qte; qPrixBu += m.qte; } }
+  const enStock = vinsActifs().filter(v => qte(v, c) > 0);
+  let valeurStock = 0, qPrixStock = 0, nbStock = 0;
+  for (const v of enStock) { const n = qte(v, c); nbStock += n; const p = prixRef(v); if (p != null) { valeurStock += p * n; qPrixStock += n; } }
+  const moisPeriode = ui.periode === '12m' ? 12 : ui.periode === 'annee' ? new Date().getMonth() + 1 : Math.max(1, moisEntre(sorties.reduce((a, m) => (m.date && m.date < a ? m.date : a), today()), today()));
+  const rythme = nbBues / moisPeriode;
+  const pmBu = qPrixBu ? valeurBue / qPrixBu : null, pmStock = qPrixStock ? valeurStock / qPrixStock : null;
+  html += `<div class="kpis">
+    <div class="kpi"><b>${nbBues}</b><span>bouteilles bues · ${rythme.toFixed(1).replace('.', ',')} / mois</span></div>
+    <div class="kpi"><b>${qPrixBu ? EUR0(valeurBue) : '—'}</b><span>valeur bue${qPrixBu < nbBues ? ` (${qPrixBu} btl au prix connu)` : ''}</span></div>
+    <div class="kpi"><b>${pmBu != null ? EUR2.format(pmBu) : '—'}</b><span>prix moyen d'une bouteille bue</span></div>
+    <div class="kpi"><b>${pmStock != null ? EUR2.format(pmStock) : '—'}</b><span>prix moyen d'une bouteille en stock</span></div>
+    <div class="kpi"><b>${rythme > 0 ? Math.round(nbStock / rythme) : '—'}</b><span>mois de stock au rythme actuel</span></div>
+    <div class="kpi"><b>${qPrixStock ? EUR0(valeurStock) : '—'}</b><span>valeur du stock (${nbStock} btl)</span></div></div>`;
+  if (pmBu != null && pmStock != null) {
+    const ecart = (pmStock - pmBu) / pmBu;
+    html += `<div class="banner">${Math.abs(ecart) < 0.15 ? 'Vous buvez des bouteilles d’un prix proche de celui de votre stock.'
+      : ecart > 0 ? `Votre stock vaut en moyenne <b>${Math.round(ecart * 100)} % de plus</b> par bouteille que ce que vous buvez : les belles bouteilles attendent.`
+      : `Vous buvez en moyenne des bouteilles <b>${Math.round(-ecart * 100)} % plus chères</b> que celles qui restent en stock.`}</div>`;
+  }
+
+  // Graphique 1 : consommation par mois (une série)
+  const mois = new Map();
+  for (const m of sorties) { if (!m.date) continue; const k = m.date.slice(0, 7); const o = mois.get(k) || { n: 0, val: 0 }; o.n += m.qte; const p = prixRef(vinById(m.vinId) || {}); if (p != null) o.val += p * m.qte; mois.set(k, o); }
+  const cles = listeMois(ui.periode === 'tout' ? [...mois.keys()].sort()[0] || today().slice(0, 7) : deb.slice(0, 7), today().slice(0, 7));
+  const maxM = Math.max(1, ...cles.map(k => (mois.get(k) || {}).n || 0));
+  const etiquetteMois = k => new Date(k + '-15T12:00').toLocaleDateString('fr-FR', { month: 'short' }).replace('.', '');
+  const pas = cles.length > 18 ? Math.ceil(cles.length / 12) : 1;
+  html += `<div class="card"><h2>Bouteilles bues par mois</h2>
+    <div class="chart-mois" style="--n:${cles.length}">${cles.map((k, i) => { const o = mois.get(k) || { n: 0, val: 0 };
+      const lib = new Date(k + '-15T12:00').toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' });
+      return `<div class="col" tabindex="0" data-tip="${esc(`<b>${lib}</b><br>${plural(o.n, 'bouteille')}${o.val ? ' · ' + EUR0(o.val) : ''}`)}">
+        <span class="bar" style="height:${(o.n / maxM * 100).toFixed(1)}%"></span><span class="x">${i % pas === 0 ? esc(etiquetteMois(k)) : ''}</span></div>`; }).join('')}</div>
+    <div class="axe-note muted small">max ${maxM} btl / mois</div></div>`;
+
+  // Graphique 2 : tranches de prix, bues vs en stock (parts en %)
+  const bu = TRANCHES.map(() => 0), st = TRANCHES.map(() => 0);
+  let buInc = 0, stInc = 0;
+  for (const m of sorties) { const t = trancheDe(prixRef(vinById(m.vinId) || {})); if (t < 0) buInc += m.qte; else bu[t] += m.qte; }
+  for (const v of enStock) { const t = trancheDe(prixRef(v)); if (t < 0) stInc += qte(v, c); else st[t] += qte(v, c); }
+  const totB = bu.reduce((a, b) => a + b, 0), totS = st.reduce((a, b) => a + b, 0);
+  if (totB || totS) {
+    const maxP = Math.max(1, ...bu.map(x => totB ? x / totB : 0), ...st.map(x => totS ? x / totS : 0));
+    html += `<div class="card"><h2>Par tranche de prix</h2>
+      <div class="legende"><span><i class="sw bu"></i>Bues (${totB})</span><span><i class="sw st"></i>En stock (${totS})</span></div>
+      <div class="chart-tranches">${TRANCHES.map(([, , l], i) => {
+        const pb = totB ? bu[i] / totB : 0, ps = totS ? st[i] / totS : 0;
+        return `<div class="tr-row"><span class="tr-lib">${l}</span><span class="tr-bars">
+          <span class="hb bu" style="width:${(pb / maxP * 100).toFixed(1)}%" data-tip="${esc(`<b>${l}</b><br>Bues : ${bu[i]} btl (${Math.round(pb * 100)} %)`)}"></span>
+          <span class="hb st" style="width:${(ps / maxP * 100).toFixed(1)}%" data-tip="${esc(`<b>${l}</b><br>En stock : ${st[i]} btl (${Math.round(ps * 100)} %)`)}"></span></span>
+          <span class="tr-val">${Math.round(pb * 100)} %<br>${Math.round(ps * 100)} %</span></div>`; }).join('')}</div>
+      ${buInc || stInc ? `<p class="muted small" style="margin:8px 0 0">Sans prix connu : ${buInc} bues, ${stInc} en stock (non comptées).</p>` : ''}
+      <details class="tableau"><summary>Voir le tableau</summary><table><tr><th>Tranche</th><th>Bues</th><th>En stock</th></tr>
+        ${TRANCHES.map(([, , l], i) => `<tr><td>${l}</td><td>${bu[i]}</td><td>${st[i]}</td></tr>`).join('')}</table></details></div>`;
+  }
+
+  // Vins les plus bus et rapport note / prix
+  const parVin = new Map();
+  for (const m of sorties) { const o = parVin.get(m.vinId) || { n: 0, notes: [] }; o.n += m.qte; if (m.noteSur20 != null) o.notes.push(m.noteSur20); parVin.set(m.vinId, o); }
+  for (const m of mvtsActifs()) if (m.type === 'commentaire' && m.noteSur20 != null && (m.date || '') >= deb && parVin.has(m.vinId)) parVin.get(m.vinId).notes.push(m.noteSur20);
+  const lignes = [...parVin.entries()].map(([id, o]) => { const v = vinById(id) || {}; const p = prixRef(v); const note = o.notes.length ? o.notes.reduce((a, b) => a + b, 0) / o.notes.length : null; return { v, n: o.n, p, note }; });
+  const top = lignes.slice().sort((a, b) => b.n - a.n).slice(0, 8);
+  html += `<div class="card"><h2>Les plus bus</h2><table class="t-analyse"><tr><th>Vin</th><th>Bues</th><th>Prix</th><th>Note</th></tr>
+    ${top.map(l => `<tr><td><button class="btn link" data-vin="${esc(l.v.id || '')}">${esc(nomComplet(l.v))}</button></td><td>${l.n}</td><td>${l.p != null ? EUR0(l.p) : '—'}</td><td>${l.note != null ? l.note.toFixed(1).replace('.', ',') : '—'}</td></tr>`).join('')}</table></div>`;
+  const notes = lignes.filter(l => l.note != null && l.p);
+  if (notes.length >= 2) {
+    html += renderNuageNotes(notes);
+    const rq = notes.map(l => ({ ...l, r: l.note / Math.log2(l.p + 2) })).sort((a, b) => b.r - a.r).slice(0, 5);
+    html += `<div class="card"><h2>Meilleurs rapports qualité / prix</h2><ol class="rq">${rq.map(l => `<li><button class="btn link" data-vin="${esc(l.v.id)}">${esc(nomComplet(l.v))}</button> <span class="muted small">${l.note.toFixed(1).replace('.', ',')}/20 pour ${EUR0(l.p)}</span></li>`).join('')}</ol>
+      <p class="muted small" style="margin:6px 0 0">Classement : note obtenue au regard du prix payé (les prix élevés sont pondérés).</p></div>`;
+  } else {
+    html += `<p class="muted small">Notez vos dégustations (/20) pour voir le rapport qualité / prix de vos vins.</p>`;
+  }
+  return html;
+}
+function renderNuageNotes(pts) {
+  const W = 320, H = 200, g = { l: 34, r: 10, t: 10, b: 28 };
+  const maxP = Math.max(...pts.map(p => p.p)) * 1.1, minN = Math.min(10, ...pts.map(p => p.note)), maxN = 20;
+  const x = p => g.l + (p / maxP) * (W - g.l - g.r), y = n => H - g.b - ((n - minN) / (maxN - minN)) * (H - g.t - g.b);
+  const ticksX = [0, maxP / 3, 2 * maxP / 3].map(v => Math.round(v / 5) * 5);
+  const ticksY = [minN, (minN + maxN) / 2, maxN].map(Math.round);
+  return `<div class="card"><h2>Note selon le prix</h2><svg class="nuage" viewBox="0 0 ${W} ${H}" role="img" aria-label="Note sur 20 selon le prix par bouteille">
+    ${ticksY.map(n => `<line class="grille" x1="${g.l}" x2="${W - g.r}" y1="${y(n)}" y2="${y(n)}"/><text class="ax" x="${g.l - 6}" y="${y(n) + 4}" text-anchor="end">${n}</text>`).join('')}
+    ${ticksX.map(p => `<text class="ax" x="${x(p)}" y="${H - 8}" text-anchor="middle">${p} €</text>`).join('')}
+    ${pts.map(p => `<circle class="pt" cx="${x(p.p).toFixed(1)}" cy="${y(p.note).toFixed(1)}" r="5" data-vin="${esc(p.v.id)}" data-tip="${esc(`<b>${esc(nomComplet(p.v))}</b><br>${p.note.toFixed(1).replace('.', ',')}/20 · ${EUR0(p.p)}`)}"/>`).join('')}
+  </svg><p class="muted small" style="margin:4px 0 0">Chaque point est un vin bu et noté. En haut à gauche : bonnes notes pour peu cher.</p></div>`;
+}
+function moisEntre(a, b) { const [ya, ma] = a.split('-').map(Number), [yb, mb] = b.split('-').map(Number); return (yb - ya) * 12 + (mb - ma) + 1; }
+function listeMois(deb, fin) {
+  const r = []; let [y, m] = deb.split('-').map(Number); const [yf, mf] = fin.split('-').map(Number);
+  while (y < yf || (y === yf && m <= mf)) { r.push(`${y}-${String(m).padStart(2, '0')}`); if (++m > 12) { m = 1; y++; } if (r.length > 240) break; }
+  return r;
+}
+// Infobulle partagée pour les graphiques ([data-tip])
+function infobulle() {
+  let tip = $('#tip');
+  if (!tip) { tip = document.createElement('div'); tip.id = 'tip'; tip.className = 'tip'; document.body.appendChild(tip); }
+  return tip;
+}
+function montrerTip(el, x, y) {
+  const tip = infobulle();
+  tip.innerHTML = el.dataset.tip;
+  tip.classList.add('show');
+  const r = tip.getBoundingClientRect();
+  tip.style.left = Math.min(window.innerWidth - r.width - 8, Math.max(8, x - r.width / 2)) + 'px';
+  tip.style.top = Math.max(8, y - r.height - 14) + 'px';
+}
+document.addEventListener('pointerover', e => { const el = e.target.closest?.('[data-tip]'); if (el) { const b = el.getBoundingClientRect(); montrerTip(el, e.clientX || b.left + b.width / 2, b.top); } });
+document.addEventListener('pointerout', e => { if (e.target.closest?.('[data-tip]')) infobulle().classList.remove('show'); });
+document.addEventListener('focusin', e => { const el = e.target.closest?.('[data-tip]'); if (el) { const b = el.getBoundingClientRect(); montrerTip(el, b.left + b.width / 2, b.top); } });
+document.addEventListener('scroll', () => $('#tip')?.classList.remove('show'), true);
+
 /* ---------- Onglet Bilan ---------- */
 function bars(rows) {
   const max = Math.max(1, ...rows.map(r => r[1]));
@@ -654,6 +921,8 @@ function renderBilan() {
   if (verif) html += `<div class="card"><h2>Fiches à compléter</h2><p class="muted small" style="margin:0 0 6px">${plural(verif, 'fiche')} signalée${verif > 1 ? 's' : ''} lors de la reprise du fichier Excel (millésime manquant, appellation corrigée…).</p><button class="btn link" data-act="voir-verif">Les passer en revue</button></div>`;
   html += `<div class="card"><h2>Caves</h2><ul class="list-plain">${data.caves.map(cv => `<li><span>${esc(cv.nom)}</span><button class="btn link" data-act="renommer-cave" data-id="${esc(cv.id)}">Renommer</button></li>`).join('')}</ul>
     <button class="btn" data-act="ajouter-cave" style="margin-top:8px">Ajouter une cave</button></div>`;
+  html += `<div class="card"><h2>Lecture des étiquettes (IA)</h2><p class="small" style="margin:0 0 8px">${IA.prete() ? '✅ Prête : le bouton 📷 reconnaît vos bouteilles.' : 'Non configurée : le bouton 📷 a besoin du relais IA.'}</p>
+    <button class="btn" data-act="ia-reglages">Réglages</button></div>`;
   const th = themeActuel();
   html += `<div class="card"><h2>Apparence</h2><div class="theme-pick">${[['auto', 'Automatique'], ['etiquette', 'Étiquette'], ['cave', 'Cave']].map(([k, l]) =>
     `<button type="button" class="chip" data-act="theme" data-id="${k}" aria-pressed="${th === k}">${l}</button>`).join('')}</div>
@@ -802,6 +1071,7 @@ function formCommentaire(vinId, mvtId) {
 // Saisie rapide « J'ai bu » : recherche puis sortie d'une bouteille
 function choisirVinBu() {
   openSheet(`${head('J’ai bu une bouteille', 'Cherchez le vin, puis touchez-le')}
+    <div class="row" style="margin-bottom:10px"><button class="btn" data-act="scanner">📷 Photographier l'étiquette</button></div>
     <div class="search"><input id="qb" type="search" placeholder="Domaine, cuvée, millésime…" autocomplete="off"></div>
     <div id="qbList" style="margin-top:10px"></div>`);
   listeVinBu('');
@@ -904,13 +1174,15 @@ function formEmplacements(id) {
 }
 function fournisseurs() { return [...new Set(data.mouvements.map(m => m.fournisseur).filter(Boolean))].sort(); }
 
-function formVin(id, mode) {
+function formVin(id, mode, pre) {
   const src = id ? vinById(id) : null;
   const edit = mode === 'edit';
   const v = src ? { ...src } : { region: '', domaine: '', appellation: '', couleur: 'Rouge', cuvee: '', millesime: null, format: 'Bouteille', cepages: '', gardeDebut: null, gardeFin: null, prixEstime: null, notes: '' };
+  if (pre) for (const k of Object.keys(v)) if (pre[k] !== undefined && pre[k] !== null && pre[k] !== '') v[k] = pre[k];
+  const photoScan = pre && pre.photoFile;
   if (mode === 'millesime') { v.millesime = null; v.gardeDebut = null; v.gardeFin = null; v.prixEstime = null; }
   const def = ui.cave !== 'all' ? ui.cave : data.caves[0].id;
-  const titre = edit ? 'Modifier la fiche' : mode === 'millesime' ? 'Autre millésime' : 'Nouveau vin';
+  const titre = edit ? 'Modifier la fiche' : mode === 'millesime' ? 'Autre millésime' : pre ? 'Nouveau vin (étiquette lue)' : 'Nouveau vin';
   openSheet(`${head(titre, mode === 'millesime' ? titreVin(src) : '')}<form class="f">
     <label>Domaine<input name="domaine" list="dl-dom" value="${esc(v.domaine)}" required></label>${datalist('dl-dom', uniques('domaine'))}
     <label>Cuvée<input name="cuvee" list="dl-cuv" value="${esc(v.cuvee)}"></label>${datalist('dl-cuv', uniques('cuvee'))}
@@ -950,6 +1222,7 @@ function formVin(id, mode) {
     const nv = { id: uid('v'), ...fiche, emplacements: {}, aVerifier: '' };
     if (fd.emplacement.trim()) nv.emplacements[fd.cave] = fd.emplacement.trim();
     const q = int(fd.qte);
+    if (photoScan) enregistrerPhoto(nv, photoScan).then(r => commit(() => { Object.assign(nv, r); nv.maj = nowIso(); })).catch(() => {});
     commit(() => {
       data.vins.push(nv);
       if (q > 0) data.mouvements.push({ id: uid('m'), vinId: nv.id, type: 'entree', date: fd.date || null, qte: q, cave: fd.cave, prix: num(fd.prix), fournisseur: fd.fournisseur.trim(), maj: nowIso() });
@@ -1064,6 +1337,8 @@ async function exportXlsx(versOneDrive) {
 
 /* ---------- Événements ---------- */
 document.addEventListener('click', e => {
+  const pt = e.target.closest('circle[data-vin]');
+  if (pt) { ouvrirVin(pt.dataset.vin); return; }
   const t = e.target.closest('button');
   if (!t) return;
   if (t.dataset.step) {
@@ -1078,10 +1353,11 @@ document.addEventListener('click', e => {
   if (t.dataset.couleur !== undefined) { ui.couleur = t.dataset.couleur; render(); return; }
   if (t.dataset.toggle) { ui[t.dataset.toggle] = !ui[t.dataset.toggle]; saveUi(); render(); return; }
   if (t.dataset.jtype !== undefined) { ui.jtype = t.dataset.jtype; render(); return; }
+  if (t.dataset.periode) { ui.periode = t.dataset.periode; render(); return; }
   if (t.dataset.vin) { ouvrirVin(t.dataset.vin); return; }
   if (t.dataset.mvt) { ouvrirMvt(t.dataset.mvt); return; }
   if (t.id === 'fab') { formVin(null, 'new'); return; }
-  if (t.id === 'fabBoire') { choisirVinBu(); return; }
+  if (t.id === 'fabScan') { scannerEtiquette(); return; }
   if (t.id === 'syncBtn') { if (syncMsg) toast(syncMsg); if (account) sync(); return; }
   const id = t.dataset.id;
   switch (t.dataset.act) {
@@ -1093,6 +1369,27 @@ document.addEventListener('click', e => {
     case 'vide': data = emptyData(); commit(() => {}, 'Cave créée'); break;
     case 'boire': formBoire(id); break;
     case 'boire-rapide': choisirVinBu(); break;
+    case 'scanner': scannerEtiquette(); break;
+    case 'ia-reglages': formIaReglages(); break;
+    case 'scan-boire': case 'scan-ajouter': {
+      const v = vinById(id);
+      photoScanSurFiche(v);
+      if (t.dataset.act === 'scan-boire') formBoire(id); else formEntree(id);
+      break;
+    }
+    case 'scan-completer': {
+      const v = vinById(id);
+      const c = complementsPossibles(v, scan.lu);
+      commit(() => { Object.assign(v, c); v.maj = nowIso(); }, 'Fiche complétée');
+      afficherScan();
+      break;
+    }
+    case 'scan-nouveau': {
+      const lu = scan.lu;
+      const coche = $('#scanPhoto');
+      formVin(null, 'new', { domaine: lu.domaine, cuvee: lu.cuvee, appellation: lu.appellation, region: lu.region, couleur: lu.couleur, millesime: lu.millesime, format: lu.format, cepages: lu.cepages, gardeDebut: lu.gardeDebut, gardeFin: lu.gardeFin, prixEstime: lu.prixIndicatif, photoFile: coche && !coche.checked ? null : scan.file });
+      break;
+    }
     case 'commentaire': formCommentaire(id); break;
     case 'edit-commentaire': formCommentaire(null, id); break;
     case 'suppr-commentaire': {
