@@ -16,7 +16,7 @@ let data = null;
 let etag = null;
 let dirty = false;
 let rev = 0;
-let ui = { tab: 'cave', cave: 'all', q: '', couleur: '', epuises: false, verif: false, incomplet: false, jtype: '', periode: '12m' };
+let ui = { tab: 'cave', cave: 'all', q: '', couleur: '', epuises: false, verif: false, incomplet: false, alertes: false, jtype: '', periode: '12m' };
 let msalApp = null;
 let account = null;
 let remoteChecked = false;
@@ -118,6 +118,7 @@ function computeStock() {
     else if (m.type === 'ajustement') add(m.vinId, m.cave, q);
   }
   STOCK = s;
+  ALERTES = new Map();
 }
 function qte(v, cave = 'all') {
   const o = STOCK.get(v.id) || {};
@@ -152,6 +153,35 @@ function manquants(v) {
   if (!v.gardeDebut && !v.gardeFin) m.push('période de garde');
   if (!v.photo) m.push('photo');
   return m;
+}
+// Alerte de stock : seuil choisi sur la fiche (0 = jamais), sinon automatique (25 % des bouteilles achetées)
+let ALERTES = new Map();
+function alerteStock(v) {
+  if (!ALERTES.has(v.id)) ALERTES.set(v.id, calculerAlerte(v));
+  return ALERTES.get(v.id);
+}
+function calculerAlerte(v) {
+  if (v.seuilAlerte === 0) return null;
+  let achetees = 0, dernSortie = '', bues90 = 0;
+  const il90 = new Date(Date.now() - 90 * 864e5).toISOString().slice(0, 10);
+  for (const m of data.mouvements) {
+    if (m.supprime || m.vinId !== v.id) continue;
+    if (m.type === 'entree') achetees += m.qte;
+    if (m.type === 'sortie') { if ((m.date || '') > dernSortie) dernSortie = m.date || ''; if ((m.date || '') >= il90) bues90 += m.qte; }
+  }
+  const n = qte(v);
+  const seuil = v.seuilAlerte ?? (achetees >= 3 ? Math.max(1, Math.round(achetees * 0.25)) : null);
+  if (n <= 0) {
+    const il60 = new Date(Date.now() - 60 * 864e5).toISOString().slice(0, 10);
+    return dernSortie >= il60 && achetees > 0 ? { k: 'epuise', label: 'Épuisé', detail: `Dernière bouteille bue le ${fmtDate(dernSortie)}` } : null;
+  }
+  const rapide = bues90 >= 2 && bues90 >= n;
+  if (seuil != null && n <= seuil) {
+    const semaines = bues90 ? Math.max(1, Math.round(n / (bues90 / 13))) : null;
+    return { k: 'bas', label: `Stock bas · ${n}`, detail: `Plus que ${plural(n, 'bouteille')} sur ${achetees}${semaines && rapide ? ` · épuisé dans ~${plural(semaines, 'semaine')} au rythme actuel` : ''}` };
+  }
+  if (rapide) return { k: 'rapide', label: 'Part vite', detail: `${bues90} bues en 3 mois, il en reste ${n}` };
+  return null;
 }
 function titreVin(v) { return v.cuvee || v.appellation || v.domaine || 'Vin sans nom'; }
 function sousTitre(v) {
@@ -618,8 +648,10 @@ function renderCave(content) {
   }
   const verif = vinsActifs().filter(v => v.aVerifier).length;
   const incompl = vinsActifs().filter(v => qte(v, ui.cave) > 0 && manquants(v).length).length;
+  const nbAlertes = vinsActifs().filter(alerteStock).length;
   $('#chips').innerHTML = ['', ...COULEURS].filter(c => !c || vinsActifs().some(v => v.couleur === c)).map(c =>
     `<button type="button" class="chip" data-couleur="${esc(c)}" aria-pressed="${ui.couleur === c}">${c || 'Toutes couleurs'}</button>`).join('') +
+    (nbAlertes ? `<button type="button" class="chip chip-alerte" data-toggle="alertes" aria-pressed="${ui.alertes}">🔔 Stock (${nbAlertes})</button>` : '') +
     `<button type="button" class="chip" data-toggle="epuises" aria-pressed="${ui.epuises}">Épuisés</button>` +
     (verif ? `<button type="button" class="chip" data-toggle="verif" aria-pressed="${ui.verif}">À vérifier (${verif})</button>` : '') +
     (incompl ? `<button type="button" class="chip" data-toggle="incomplet" aria-pressed="${ui.incomplet}">À compléter (${incompl})</button>` : '');
@@ -630,10 +662,11 @@ function filtreVins() {
   const words = q ? q.split(/\s+/) : [];
   return vinsActifs().filter(v => {
     const n = qte(v, ui.cave);
-    if (!ui.epuises && n <= 0) return false;
+    if (!ui.epuises && n <= 0 && !(ui.alertes && alerteStock(v))) return false;
     if (ui.couleur && v.couleur !== ui.couleur) return false;
     if (ui.verif && !v.aVerifier) return false;
     if (ui.incomplet && !manquants(v).length) return false;
+    if (ui.alertes && !alerteStock(v)) return false;
     if (words.length) {
       const hay = norm([v.domaine, v.cuvee, v.appellation, v.region, v.millesime, v.cepages, v.couleur, v.format, ...Object.values(v.emplacements || {})].join(' '));
       if (!words.every(w => hay.includes(w))) return false;
@@ -651,9 +684,11 @@ function trierVins(list) {
 function renderList() {
   const list = trierVins(filtreVins());
   const total = list.reduce((a, v) => a + qte(v, ui.cave), 0);
-  let html = `<div class="summary">${plural(total, 'bouteille')} · ${plural(list.length, 'vin')}${ui.cave !== 'all' ? ' · ' + esc(caveNom(ui.cave)) : ''}</div>`;
+  const alertes = vinsActifs().filter(alerteStock);
+  let html = alertes.length && !ui.alertes && !ui.q ? `<button type="button" class="alerte-banner" data-toggle="alertes">🔔 <span><b>${plural(alertes.length, 'vin')} à surveiller</b> : ${esc(alertes.slice(0, 3).map(v => nomComplet(v)).join(', '))}${alertes.length > 3 ? '…' : ''}</span><span class="voir">Voir</span></button>` : '';
+  html += `<div class="summary">${plural(total, 'bouteille')} · ${plural(list.length, 'vin')}${ui.cave !== 'all' ? ' · ' + esc(caveNom(ui.cave)) : ''}</div>`;
   if (!list.length) {
-    html += `<div class="empty-state">${ui.q || ui.couleur || ui.verif || ui.incomplet ? 'Aucun vin ne correspond.' : ui.cave !== 'all' ? 'Aucune bouteille dans cette cave pour le moment.' : 'Aucun vin. Ajoutez-en avec le bouton +.'}</div>`;
+    html += `<div class="empty-state">${ui.q || ui.couleur || ui.verif || ui.incomplet || ui.alertes ? 'Aucun vin ne correspond.' : ui.cave !== 'all' ? 'Aucune bouteille dans cette cave pour le moment.' : 'Aucun vin. Ajoutez-en avec le bouton +.'}</div>`;
   } else {
     let region = null;
     for (const v of list) {
@@ -673,11 +708,12 @@ function carteVin(v) {
   const st = statut(v);
   const loc = emplacementTexte(v);
   const mini = v.photoMini || v.photo;
+  const al = alerteStock(v);
   return `<div class="vin-wrap"><button type="button" class="vin${n <= 0 ? ' empty' : ''}${n > 0 ? ' has-quick' : ''}" data-vin="${esc(v.id)}">
     ${mini ? `<span class="thumb ${couleurClass(v.couleur)}"><img data-photo="${esc(mini)}" alt="" decoding="async"></span>` : `<span class="dot ${couleurClass(v.couleur)}" title="${esc(v.couleur)}"></span>`}
     <span class="vin-main"><span class="vin-title">${esc(titreVin(v))}</span>
       <span class="vin-sub" style="display:block">${esc(sousTitre(v))}${v.format && v.format !== 'Bouteille' ? ' · ' + esc(v.format) : ''}</span>
-      <span class="vin-meta"><span class="pill s-${st.k}">${esc(st.label)}</span>${v.aVerifier ? '<span class="pill verif">À vérifier</span>' : ''}${loc ? `<span class="loc">📍 ${esc(loc)}</span>` : ''}</span></span>
+      <span class="vin-meta"><span class="pill s-${st.k}">${esc(st.label)}</span>${al ? `<span class="pill alerte a-${al.k}">🔔 ${esc(al.label)}</span>` : ''}${v.aVerifier ? '<span class="pill verif">À vérifier</span>' : ''}${loc ? `<span class="loc">📍 ${esc(loc)}</span>` : ''}</span></span>
     <span class="vin-right"><span class="vin-year" style="display:block">${esc(v.millesime || 'NM')}</span><span class="vin-qty">${n}<small>btl</small></span></span>
   </button>${n > 0 ? `<button type="button" class="quick-boire" data-act="boire" data-id="${esc(v.id)}" aria-label="Boire une bouteille de ${esc(nomComplet(v))}">🍷 Bu</button>` : ''}</div>`;
 }
@@ -695,6 +731,8 @@ function renderBoire() {
   if (depasse.length) html += `<div class="group-title"><span>Limite dépassée</span><span>${somme(depasse)}</span></div>` + depasse.map(carteVin).join('');
   if (urgent.length) html += `<div class="group-title"><span>À boire bientôt</span><span>${somme(urgent)}</span></div>` + urgent.map(carteVin).join('');
   if (!depasse.length && !urgent.length) html += `<div class="empty-state">Rien d'urgent : tous les vins renseignés ont encore le temps.</div>`;
+  const alertes = vinsActifs().filter(alerteStock);
+  if (alertes.length) html += `<div class="group-title"><span>🔔 Stock à surveiller</span><span>${alertes.length}</span></div>` + alertes.map(v => `<div class="alerte-ligne"><button type="button" class="btn link" data-vin="${esc(v.id)}">${esc(nomComplet(v))}</button><span class="muted small">${esc(alerteStock(v).detail)}</span></div>`).join('');
   if (inconnu.length) {
     html += `<div class="card" style="margin-top:16px"><h2>Garde non renseignée</h2><p class="muted small" style="margin:0 0 8px">${plural(inconnu.length, 'vin')} (${plural(somme(inconnu), 'bouteille')}) n'ont pas de dates de garde : ils n'apparaissent pas ici.</p>
       <button class="btn link" data-act="voir-inconnus">Voir ces vins</button></div>`;
@@ -994,6 +1032,7 @@ function ouvrirVin(id) {
     <dl class="info">
       <dt>Appellation</dt><dd>${esc(v.appellation || '—')}</dd>
       <dt>Région</dt><dd>${esc(v.region || '—')}</dd>
+      <dt>Alerte stock</dt><dd>${v.seuilAlerte === 0 ? 'Désactivée' : v.seuilAlerte != null ? `Sous ${plural(v.seuilAlerte, 'bouteille')}` : 'Automatique (25 % des achats)'}${alerteStock(v) ? ` · <b>🔔 ${esc(alerteStock(v).detail)}</b>` : ''}</dd>
       <dt>Garde</dt><dd>${v.gardeDebut || v.gardeFin ? `${v.gardeDebut || '?'} → ${v.gardeFin || '?'}` : '—'}</dd>
       <dt>Cépages</dt><dd>${esc(v.cepages || '—')}</dd>
       <dt>Prix d'achat moyen</dt><dd>${pm != null ? EUR2.format(pm) : '—'}</dd>
@@ -1086,6 +1125,8 @@ function formBoire(id) {
     if (!q || q < 1 || q > dispo) { toast(`Quantité invalide (${dispo} en stock)`); return false; }
     commit(() => data.mouvements.push({ id: uid('m'), vinId: v.id, type: 'sortie', date: fd.date, qte: q, cave: fd.cave, occasion: fd.occasion.trim(), noteSur20: num(fd.noteSur20), commentaire: fd.commentaire.trim(), maj: nowIso() }),
       `${plural(q, 'bouteille')} sortie${q > 1 ? 's' : ''} · santé !`);
+    const al = alerteStock(v);
+    if (al) setTimeout(() => toast(`🔔 ${nomComplet(v)} : ${al.k === 'epuise' ? 'dernière bouteille bue' : al.detail}`), 2700);
     if (depuisFiche) setTimeout(() => ouvrirVin(v.id), 0);
   }, v.id);
 }
@@ -1171,7 +1212,8 @@ function formVin(id, mode, pre) {
     <label>Cépages<input name="cepages" value="${esc(v.cepages)}"></label></div>
     <div class="two"><label>À boire à partir de<input type="number" name="gardeDebut" min="1900" max="2150" inputmode="numeric" value="${esc(v.gardeDebut ?? '')}"></label>
     <label>À boire avant fin<input type="number" name="gardeFin" min="1900" max="2150" inputmode="numeric" value="${esc(v.gardeFin ?? '')}"></label></div>
-    <label>Valeur estimée actuelle (€ / btl)<input type="number" name="prixEstime" min="0" step="0.01" inputmode="decimal" value="${esc(v.prixEstime ?? '')}"></label>
+    <div class="two"><label>Valeur estimée actuelle (€ / btl)<input type="number" name="prixEstime" min="0" step="0.01" inputmode="decimal" value="${esc(v.prixEstime ?? '')}"></label>
+    <label>M'alerter sous (btl)<input type="number" name="seuilAlerte" min="0" inputmode="numeric" value="${esc(v.seuilAlerte ?? '')}" placeholder="Auto · 0 = jamais"></label></div>
     <label>Notes<textarea name="notes">${esc(v.notes)}</textarea></label>
     ${edit ? '' : `<fieldset><legend>Bouteilles à ajouter</legend>
       <div class="two"><label>Cave<select name="cave">${options(data.caves.map(c => [c.id, c.nom]), def)}</select></label><label>Quantité<input type="number" name="qte" min="0" value="6" inputmode="numeric"></label></div>
@@ -1182,7 +1224,7 @@ function formVin(id, mode, pre) {
     const fiche = {
       domaine: fd.domaine.trim(), cuvee: fd.cuvee.trim(), appellation: fd.appellation.trim(), region: fd.region.trim(),
       couleur: fd.couleur, millesime: int(fd.millesime), format: fd.format, cepages: fd.cepages.trim(),
-      gardeDebut: int(fd.gardeDebut), gardeFin: int(fd.gardeFin), prixEstime: num(fd.prixEstime), notes: fd.notes.trim(), maj: nowIso()
+      gardeDebut: int(fd.gardeDebut), gardeFin: int(fd.gardeFin), prixEstime: num(fd.prixEstime), seuilAlerte: int(fd.seuilAlerte), notes: fd.notes.trim(), maj: nowIso()
     };
     if (fiche.gardeDebut && fiche.gardeFin && fiche.gardeFin < fiche.gardeDebut) { toast('La fin de garde doit être après le début'); return false; }
     if (edit) {
@@ -1254,7 +1296,55 @@ function importerComplements(liste) {
   }, '');
   toast(`${plural(n, 'fiche complétée', 'fiches complétées')}`);
 }
+// Fichier d'achats : { "achats": [ { domaine, cuvee, appellation, region, couleur, millesime, format, cepages,
+//   gardeDebut, gardeFin, qte, prix, date, cave, fournisseur, emplacement } ] }
+// Chaque achat rejoint la fiche existante (même vin, même millésime, même format) ou crée une fiche.
+function cleVin(x) { return [norm(x.domaine), norm(x.cuvee), norm(x.appellation), x.millesime || '', x.format || 'Bouteille'].join('|'); }
+function trouverCave(nom) {
+  if (!nom) return ui.cave !== 'all' ? ui.cave : data.caves[0].id;
+  return (data.caves.find(c => c.id === nom || norm(c.nom) === norm(nom)) || {}).id || null;
+}
+function importerAchats(achats) {
+  if (!data) { toast('Chargez d’abord votre cave'); return; }
+  computeStock();
+  const lignes = achats.filter(a => a && a.domaine && int(a.qte) > 0).map(a => {
+    const fiche = vinsActifs().find(v => cleVin(v) === cleVin({ ...a, format: a.format || 'Bouteille' }));
+    return { a, fiche, cave: trouverCave(a.cave) };
+  });
+  const inconnues = lignes.filter(l => !l.cave);
+  if (!lignes.length) { toast('Aucun achat lisible dans ce fichier'); return; }
+  if (inconnues.length) { toast(`Cave inconnue : ${inconnues[0].a.cave}`); return; }
+  const total = lignes.reduce((s, l) => s + int(l.a.qte), 0);
+  openSheet(`${head('Ajouter les achats', `${plural(total, 'bouteille')} · ${plural(lignes.length, 'vin')}`)}
+    <div class="achats">${lignes.map(({ a, fiche, cave }) => `<div class="achat"><div><b>${esc(nomComplet({ ...a, format: a.format || 'Bouteille' }))}</b>
+      <div class="muted small">${esc([a.domaine !== (a.cuvee || a.appellation) ? a.domaine : '', caveNom(cave), a.emplacement ? '📍 ' + a.emplacement : '', a.prix != null ? EUR2.format(a.prix) + '/btl' : 'prix ?'].filter(Boolean).join(' · '))}</div>
+      <div class="small ${fiche ? '' : 'nouveau'}">${fiche ? `Ajouté à la fiche existante (${qte(fiche)} en stock)` : 'Nouvelle fiche'}</div></div>
+      <span class="achat-q">+${int(a.qte)}</span></div>`).join('')}</div>
+    <div class="row" style="margin-top:12px"><button class="btn primary" data-act="valider-achats">Ajouter au stock</button><button class="btn" data-act="close">Annuler</button></div>`);
+  importerAchats.enAttente = lignes;
+}
+function validerAchats() {
+  const lignes = importerAchats.enAttente || [];
+  importerAchats.enAttente = null;
+  let nouveaux = 0, btl = 0;
+  commit(() => {
+    for (const { a, fiche, cave } of lignes) {
+      let v = fiche;
+      if (!v) {
+        v = { id: uid('v'), domaine: a.domaine.trim(), cuvee: (a.cuvee || '').trim(), appellation: (a.appellation || '').trim(), region: a.region || '', couleur: COULEURS.includes(a.couleur) ? a.couleur : 'Rouge',
+          millesime: int(a.millesime), format: FORMATS.includes(a.format) ? a.format : 'Bouteille', cepages: a.cepages || '', gardeDebut: int(a.gardeDebut), gardeFin: int(a.gardeFin),
+          prixEstime: num(a.prixEstime), notes: a.notes || '', emplacements: {}, aVerifier: a.aVerifier || '', maj: nowIso() };
+        data.vins.push(v); nouveaux++;
+      }
+      if (a.emplacement) { v.emplacements[cave] = a.emplacement; v.maj = nowIso(); }
+      data.mouvements.push({ id: uid('m'), vinId: v.id, type: 'entree', date: a.date || today(), qte: int(a.qte), cave, prix: num(a.prix), fournisseur: (a.fournisseur || '').trim(), maj: nowIso() });
+      btl += int(a.qte);
+    }
+  }, `${plural(btl, 'bouteille ajoutée', 'bouteilles ajoutées')}${nouveaux ? ` · ${plural(nouveaux, 'nouvelle fiche', 'nouvelles fiches')}` : ''}`);
+  closeSheet();
+}
 function importerDonnees(obj) {
+  if (obj && Array.isArray(obj.achats)) { importerAchats(obj.achats); return; }
   if (obj && Array.isArray(obj.complements)) { importerComplements(obj.complements); return; }
   const d = normalize(obj);
   if (data && vinsActifs().length && !confirm(`Remplacer la cave actuelle (${vinsActifs().length} vins) par le fichier importé (${d.vins.length} vins) ?`)) return;
@@ -1377,6 +1467,7 @@ document.addEventListener('click', e => {
     }
     case 'photo': choisirPhoto(id); break;
     case 'theme': appliquerTheme(id); render(); break;
+    case 'valider-achats': validerAchats(); break;
     case 'photo-web': lienPhotoWeb(id); break;
     case 'photo-suppr': {
       const v = vinById(id);

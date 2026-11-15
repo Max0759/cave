@@ -446,3 +446,18 @@ ol.rq .btn.link { padding: 0; }
 ol.etapes { margin: 0 0 12px; padding-left: 20px; display: grid; gap: 10px; }
 ol.etapes li { display: grid; gap: 4px; }
 a.btn { text-decoration: none; }
+
+/* Alertes de stock */
+.pill.alerte { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
+.pill.alerte.a-epuise { background: color-mix(in srgb, var(--bad) 15%, transparent); color: var(--bad); }
+.alerte-banner { width: 100%; display: flex; gap: 10px; align-items: center; text-align: left; margin: 10px 0 2px; padding: 10px 12px;
+  border-radius: 10px; border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent); background: color-mix(in srgb, var(--warn) 12%, var(--surface)); font-size: 13.5px; }
+.alerte-banner span:nth-child(2) { flex: 1; min-width: 0; }
+.alerte-banner .voir { color: var(--accent); font-weight: 700; }
+.alerte-ligne { display: grid; gap: 2px; padding: 8px 2px; border-top: 1px solid var(--line); }
+.alerte-ligne .btn.link { padding: 0; text-align: left; }
+/* Import d'achats */
+.achats { display: grid; gap: 8px; }
+.achat { display: flex; gap: 10px; justify-content: space-between; align-items: center; padding: 10px; border: 1px solid var(--line); border-radius: 10px; }
+.achat .nouveau { color: var(--ok); font-weight: 600; }
+.achat-q { font: 700 20px var(--serif); color: var(--title); font-variant-numeric: tabular-nums; }
