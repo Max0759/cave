@@ -1496,7 +1496,29 @@ function validerHistorique() {
   }, `Historique ajouté : ${plural(x.bues, 'bouteille bue', 'bouteilles bues')}`);
   closeSheet();
 }
+// Vins encore en cave alors que l'inventaire les a passés à « bus » : { "restaurer": { "<idVin>": nombre réel, ... } }
+function importerRestauration(r) {
+  if (!data) { toast('Chargez d’abord votre cave'); return; }
+  computeStock();
+  const lignes = Object.entries(r).map(([id, n]) => ({ v: vinById(id), n: Math.max(0, int(n) ?? 0),
+    sorties: mvtsActifs().filter(m => m.vinId === id && m.type === 'sortie' && String(m.occasion || '').startsWith('Bue (constaté')) })).filter(x => x.v);
+  if (!lignes.length) { toast('Aucun vin correspondant'); return; }
+  openSheet(`${head('Remettre en stock', 'Vins retirés à tort par l’inventaire')}
+    <table class="stock-table">${lignes.map(x => `<tr><td>${esc(nomComplet(x.v))}<div class="muted small">${x.sorties.length ? 'la sortie « bue à l’inventaire » est annulée' : 'correction du stock'}</div></td><td class="q">${qte(x.v)} → ${x.n}</td></tr>`).join('')}</table>
+    <div class="row" style="margin-top:12px"><button class="btn primary" data-act="valider-restauration">Remettre en stock</button><button class="btn" data-act="close">Annuler</button></div>`);
+  importerRestauration.enAttente = lignes;
+}
+function validerRestauration() {
+  const lignes = importerRestauration.enAttente || []; importerRestauration.enAttente = null;
+  commit(() => {
+    for (const x of lignes) x.sorties.forEach(m => { m.supprime = true; m.maj = nowIso(); });
+    computeStock();
+    for (const x of lignes) { const d = x.n - qte(x.v); if (d) data.mouvements.push({ id: uid('m'), vinId: x.v.id, type: 'ajustement', date: today(), qte: d, cave: data.caves[0].id, note: 'Inventaire (correction)', maj: nowIso() }); }
+  }, `${plural(lignes.length, 'vin remis', 'vins remis')} en stock`);
+  closeSheet();
+}
 function importerDonnees(obj) {
+  if (obj && obj.restaurer) { importerRestauration(obj.restaurer); return; }
   // Comptages dictés : { "inventaire": { "cave": "vieux-conde", "comptes": { "<idVin>": 4, ... } } } → écran des écarts à valider
   if (obj && obj.inventaire && obj.inventaire.comptes) {
     if (!data) { toast('Chargez d’abord votre cave'); return; }
@@ -1633,6 +1655,7 @@ document.addEventListener('click', e => {
     case 'theme': appliquerTheme(id); render(); break;
     case 'valider-achats': validerAchats(); break;
     case 'valider-historique': validerHistorique(); break;
+    case 'valider-restauration': validerRestauration(); break;
     case 'doublons': ouvrirDoublons(); break;
     case 'garder-une': garderUne([ouvrirDoublons.etat.entrees[+id]]); ouvrirDoublons(); break;
     case 'garder-une-tout': garderUne(ouvrirDoublons.etat.entrees); ouvrirDoublons(); break;
