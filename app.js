@@ -785,7 +785,7 @@ const EUR0 = n => EUR.format(Math.round(n));
 function renderAnalyse() {
   const c = ui.cave;
   const deb = debutPeriode();
-  const sorties = mvtsActifs().filter(m => m.type === 'sortie' && (c === 'all' || m.cave === c) && (m.date || '') >= deb);
+  const sorties = mvtsActifs().filter(m => m.type === 'sortie' && (c === 'all' || m.cave === c) && (m.date ? m.date >= deb : ui.periode === 'tout'));
   const nbBues = sorties.reduce((a, m) => a + m.qte, 0);
   let html = `<div class="chips" style="padding-top:0">${[['12m', '12 derniers mois'], ['annee', 'Année ' + YEAR()], ['tout', 'Depuis le début']]
     .map(([k, l]) => `<button type="button" class="chip" data-periode="${k}" aria-pressed="${ui.periode === k}">${l}</button>`).join('')}</div>`;
@@ -797,7 +797,7 @@ function renderAnalyse() {
   const enStock = vinsActifs().filter(v => qte(v, c) > 0);
   let valeurStock = 0, qPrixStock = 0, nbStock = 0;
   for (const v of enStock) { const n = qte(v, c); nbStock += n; const p = prixRef(v); if (p != null) { valeurStock += p * n; qPrixStock += n; } }
-  const moisPeriode = ui.periode === '12m' ? 12 : ui.periode === 'annee' ? new Date().getMonth() + 1 : Math.max(1, moisEntre(sorties.reduce((a, m) => (m.date && m.date < a ? m.date : a), today()), today()));
+  const moisPeriode = ui.periode === '12m' ? 12 : ui.periode === 'annee' ? new Date().getMonth() + 1 : Math.max(1, moisEntre(mvtsActifs().filter(m => m.type === 'entree' || m.type === 'sortie').reduce((a, m) => (m.date && m.date < a ? m.date : a), today()), today()));
   const rythme = nbBues / moisPeriode;
   const pmBu = qPrixBu ? valeurBue / qPrixBu : null, pmStock = qPrixStock ? valeurStock / qPrixStock : null;
   html += `<div class="kpis">
@@ -821,12 +821,14 @@ function renderAnalyse() {
   const maxM = Math.max(1, ...cles.map(k => (mois.get(k) || {}).n || 0));
   const etiquetteMois = k => new Date(k + '-15T12:00').toLocaleDateString('fr-FR', { month: 'short' }).replace('.', '');
   const pas = cles.length > 18 ? Math.ceil(cles.length / 12) : 1;
-  html += `<div class="card"><h2>Bouteilles bues par mois</h2>
+  const sansDate = sorties.filter(m => !m.date).reduce((a, m) => a + m.qte, 0);
+  if (sansDate < nbBues) html += `<div class="card"><h2>Bouteilles bues par mois</h2>
     <div class="chart-mois" style="--n:${cles.length}">${cles.map((k, i) => { const o = mois.get(k) || { n: 0, val: 0 };
       const lib = new Date(k + '-15T12:00').toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' });
       return `<div class="col" tabindex="0" data-tip="${esc(`<b>${lib}</b><br>${plural(o.n, 'bouteille')}${o.val ? ' · ' + EUR0(o.val) : ''}`)}">
         <span class="bar" style="height:${(o.n / maxM * 100).toFixed(1)}%"></span><span class="x">${i % pas === 0 ? esc(etiquetteMois(k)) : ''}</span></div>`; }).join('')}</div>
     <div class="axe-note muted small">max ${maxM} btl / mois</div></div>`;
+  if (sansDate) html += `<p class="muted small" style="margin:-4px 2px 12px">${plural(sansDate, 'bouteille bue', 'bouteilles bues')} sans date (reprises de l'Excel) ne figurent pas dans le graphique par mois.</p>`;
 
   // Graphique 2 : tranches de prix, bues vs en stock (parts en %)
   const bu = TRANCHES.map(() => 0), st = TRANCHES.map(() => 0);
@@ -1458,7 +1460,39 @@ function validerAchats() {
   }, `${plural(btl, 'bouteille ajoutée', 'bouteilles ajoutées')}${nouveaux ? ` · ${plural(nouveaux, 'nouvelle fiche', 'nouvelles fiches')}` : ''}`);
   closeSheet();
 }
+// Historique : { "historique": { "vins": [...], "mouvements": [...] } } ajoute fiches et mouvements absents (par id), sans rien écraser.
+function importerHistorique(h) {
+  if (!data) { toast('Chargez d’abord votre cave'); return; }
+  const vins = (h.vins || []).filter(v => v && v.id && !data.vins.some(x => x.id === v.id));
+  const mvts = (h.mouvements || []).filter(m => m && m.id && m.vinId && !data.mouvements.some(x => x.id === m.id));
+  if (!vins.length && !mvts.length) { toast('Cet historique est déjà dans la cave'); return; }
+  const bues = mvts.filter(m => m.type === 'sortie').reduce((a, m) => a + m.qte, 0);
+  const ent = mvts.filter(m => m.type === 'entree').reduce((a, m) => a + m.qte, 0);
+  openSheet(`${head('Reprendre l’historique', h.titre || '')}
+    <p>${plural(bues, 'bouteille bue', 'bouteilles bues')} vont être ajoutées à l'historique${vins.length ? `, dont celles de ${plural(vins.length, 'vin entièrement bu', 'vins entièrement bus')} (nouvelles fiches, épuisées)` : ''}.</p>
+    <p class="muted small">Pour chaque vin, l'achat complet est rétabli (+${ent}) et les bouteilles bues sont sorties (−${bues}) : le stock actuel ne change pas${ent - bues ? ` (écart ${ent - bues})` : ''}. L'analyse et les alertes tiennent compte de ces bouteilles.</p>
+    <div class="row" style="margin-top:12px"><button class="btn primary" data-act="valider-historique">Ajouter l'historique</button><button class="btn" data-act="close">Annuler</button></div>`);
+  importerHistorique.enAttente = { vins, mvts, bues };
+}
+function validerHistorique() {
+  const x = importerHistorique.enAttente; importerHistorique.enAttente = null;
+  if (!x) return;
+  const now = nowIso();
+  commit(() => {
+    for (const v of x.vins) data.vins.push({ emplacements: {}, aVerifier: '', ...v, maj: now });
+    for (const m of x.mvts) data.mouvements.push({ ...m, maj: now });
+  }, `Historique ajouté : ${plural(x.bues, 'bouteille bue', 'bouteilles bues')}`);
+  closeSheet();
+}
 function importerDonnees(obj) {
+  // Comptages dictés : { "inventaire": { "cave": "vieux-conde", "comptes": { "<idVin>": 4, ... } } } → écran des écarts à valider
+  if (obj && obj.inventaire && obj.inventaire.comptes) {
+    if (!data) { toast('Chargez d’abord votre cave'); return; }
+    const inv = lireInv() && lireInv().cave === obj.inventaire.cave ? lireInv() : { cave: obj.inventaire.cave || data.caves[0].id, debut: today(), comptes: {} };
+    for (const [id, n] of Object.entries(obj.inventaire.comptes)) if (vinById(id)) inv.comptes[id] = Math.max(0, int(n) ?? 0);
+    ecrireInv(inv); validerInventaire(false); return;
+  }
+  if (obj && obj.historique) { importerHistorique(obj.historique); return; }
   if (obj && Array.isArray(obj.achats)) { importerAchats(obj.achats); return; }
   if (obj && Array.isArray(obj.complements)) { importerComplements(obj.complements); return; }
   const d = normalize(obj);
@@ -1583,6 +1617,7 @@ document.addEventListener('click', e => {
     case 'photo': choisirPhoto(id); break;
     case 'theme': appliquerTheme(id); render(); break;
     case 'valider-achats': validerAchats(); break;
+    case 'valider-historique': validerHistorique(); break;
     case 'doublons': ouvrirDoublons(); break;
     case 'garder-une': garderUne([ouvrirDoublons.etat.entrees[+id]]); ouvrirDoublons(); break;
     case 'garder-une-tout': garderUne(ouvrirDoublons.etat.entrees); ouvrirDoublons(); break;
