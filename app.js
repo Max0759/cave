@@ -1244,7 +1244,8 @@ function ouvrirInventaire(caveId) {
   ecrireInv(inv);
   const vins = vinsActifs().filter(v => qte(v, caveId) > 0 || inv.comptes[v.id] != null);
   const groupes = new Map();
-  for (const v of vins) { const e = (v.emplacements || {})[caveId] || 'Sans emplacement'; if (!groupes.has(e)) groupes.set(e, []); groupes.get(e).push(v); }
+  // Groupes : l'emplacement s'il est connu, sinon le domaine (plus facile à retrouver dans la cave)
+  for (const v of vins) { const e = (v.emplacements || {})[caveId] || (v.domaine ? 'Domaine : ' + v.domaine : 'Sans emplacement'); if (!groupes.has(e)) groupes.set(e, []); groupes.get(e).push(v); }
   const cles = [...groupes.keys()].sort((a, b) => a === 'Sans emplacement' ? 1 : b === 'Sans emplacement' ? -1 : a.localeCompare(b, 'fr', { numeric: true }));
   const vus = vins.filter(v => inv.comptes[v.id] != null).length;
   openSheet(`${head('Inventaire · ' + caveNom(caveId), `${vus} / ${vins.length} vins comptés`)}
