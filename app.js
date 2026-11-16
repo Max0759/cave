@@ -1275,7 +1275,7 @@ function validerInventaire(confirme) {
   if (!confirme) {
     const moins = ecarts.reduce((a, x) => a + Math.max(0, x.att - x.n), 0), plus = ecarts.reduce((a, x) => a + Math.max(0, x.n - x.att), 0);
     openSheet(`${head('Écarts d’inventaire', caveNom(inv.cave))}
-      ${ecarts.length ? `<p>${plural(ecarts.length, 'vin')} à corriger : <b>−${moins}</b> / <b>+${plural(plus, 'bouteille')}</b>.</p>
+      ${ecarts.length ? `<p>${plural(ecarts.length, 'vin')} à corriger : <b>−${moins}</b> / <b>+${plural(plus, 'bouteille')}</b>.${(inv.bues || []).length ? ` Les bouteilles manquantes des vins indiqués comme bus sont enregistrées comme bues.` : ''}</p>
       <table class="stock-table">${ecarts.map(x => `<tr><td>${esc(nomComplet(x.v))}</td><td class="q">${x.att} → ${x.n}</td></tr>`).join('')}</table>
       <p class="muted small">Chaque écart est noté « Inventaire » dans le journal ; on peut l'annuler depuis le journal.</p>` : '<p>Aucun écart : tout ce que vous avez compté correspond au stock.</p>'}
       ${nouveaux.length ? `<div class="section-title">Vins trouvés en cave, sans fiche</div><table class="stock-table">${nouveaux.map(x => `<tr><td>${esc(nomComplet(x.vin))}<div class="muted small">${esc([x.vin.domaine, x.vin.appellation].filter(Boolean).join(' · '))} · nouvelle fiche</div></td><td class="q">+${x.n}</td></tr>`).join('')}</table>` : ''}
@@ -1284,7 +1284,10 @@ function validerInventaire(confirme) {
     return;
   }
   commit(() => {
-    ecarts.forEach(x => data.mouvements.push({ id: uid('m'), vinId: x.v.id, type: 'ajustement', date: today(), qte: x.n - x.att, cave: inv.cave, note: 'Inventaire', maj: nowIso() }));
+    const bues = new Set(inv.bues || []);
+    ecarts.forEach(x => data.mouvements.push(bues.has(x.v.id) && x.n < x.att
+      ? { id: uid('m'), vinId: x.v.id, type: 'sortie', date: null, qte: x.att - x.n, cave: inv.cave, occasion: 'Bue (constaté à l’inventaire du ' + fmtDate(today()) + ')', maj: nowIso() }
+      : { id: uid('m'), vinId: x.v.id, type: 'ajustement', date: today(), qte: x.n - x.att, cave: inv.cave, note: 'Inventaire', maj: nowIso() }));
     for (const x of nouveaux) {
       data.vins.push({ emplacements: {}, aVerifier: '', format: 'Bouteille', ...x.vin, maj: nowIso() });
       if (x.n > 0) data.mouvements.push({ id: uid('m'), vinId: x.vin.id, type: 'ajustement', date: today(), qte: x.n, cave: inv.cave, note: 'Inventaire : trouvé en cave', maj: nowIso() });
@@ -1501,6 +1504,7 @@ function importerDonnees(obj) {
     for (const [id, n] of Object.entries(obj.inventaire.comptes)) if (vinById(id)) inv.comptes[id] = Math.max(0, int(n) ?? 0);
     inv.nouveaux = (obj.inventaire.nouveaux || []).filter(x => x && x.vin && x.vin.id && !vinById(x.vin.id));
     inv.emplacements = obj.inventaire.emplacements || {};
+    inv.bues = obj.inventaire.bues || []; // vins dont les bouteilles manquantes ont été bues (sorties plutôt que corrections)
     ecrireInv(inv); validerInventaire(false); return;
   }
   if (obj && obj.historique) { importerHistorique(obj.historique); return; }
