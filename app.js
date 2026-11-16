@@ -934,6 +934,12 @@ function renderBilan() {
   html += `<div class="card"><h2>Par région</h2>${bars(grp('region'))}</div>`;
   html += `<div class="card"><h2>Par couleur</h2>${bars(grp('couleur'))}</div>`;
   if (verif) html += `<div class="card"><h2>Fiches à compléter</h2><p class="muted small" style="margin:0 0 6px">${plural(verif, 'fiche')} signalée${verif > 1 ? 's' : ''} lors de la reprise du fichier Excel (millésime manquant, appellation corrigée…).</p><button class="btn link" data-act="voir-verif">Les passer en revue</button></div>`;
+  const dbl = chercherDoublons();
+  const inv = lireInv();
+  html += `<div class="card"><h2>Contrôle de la cave</h2>
+    <p class="small" style="margin:0 0 8px">${dbl.entrees.length || dbl.fiches.length ? `⚠️ ${dbl.entrees.length ? plural(dbl.entrees.length, 'entrée en double', 'entrées en double') + ` (${plural(dbl.btlEnTrop, 'bouteille')} peut-être en trop)` : ''}${dbl.entrees.length && dbl.fiches.length ? ' · ' : ''}${dbl.fiches.length ? plural(dbl.fiches.length, 'fiche en double', 'fiches en double') : ''}` : '✅ Aucun doublon détecté.'}
+    ${inv ? `<br>Inventaire en cours : ${esc(caveNom(inv.cave))}, ${plural(Object.keys(inv.comptes).length, 'vin compté', 'vins comptés')}.` : ''}</p>
+    <div class="row"><button class="btn" data-act="doublons">Chercher les doublons</button><button class="btn" data-act="inventaire">${inv ? 'Reprendre l’inventaire' : 'Faire l’inventaire'}</button></div></div>`;
   html += `<div class="card"><h2>Caves</h2><ul class="list-plain">${data.caves.map(cv => `<li><span>${esc(cv.nom)}</span><button class="btn link" data-act="renommer-cave" data-id="${esc(cv.id)}">Renommer</button></li>`).join('')}</ul>
     <button class="btn" data-act="ajouter-cave" style="margin-top:8px">Ajouter une cave</button></div>`;
   html += `<div class="card"><h2>Lecture des étiquettes</h2><p class="small" style="margin:0 0 8px">Le bouton 📷 Scanner ouvre le lecteur d'étiquettes sur claude.ai : la lecture est incluse dans votre abonnement Claude.</p>
@@ -1169,6 +1175,114 @@ function formTransfert(id) {
     }, 'Bouteilles déplacées');
   }, v.id);
 }
+/* ---------- Contrôle de la cave : doublons et inventaire ---------- */
+// Entrées identiques (même vin, date, quantité, prix, cave) et fiches identiques (même vin, millésime, format)
+function chercherDoublons() {
+  computeStock();
+  const ent = new Map();
+  for (const m of mvtsActifs()) {
+    if (m.type !== 'entree') continue;
+    const k = [m.vinId, m.date || '', m.qte, m.prix ?? '', m.cave, norm(m.fournisseur)].join('|');
+    if (!ent.has(k)) ent.set(k, []);
+    ent.get(k).push(m);
+  }
+  const entrees = [...ent.values()].filter(l => l.length > 1 && vinById(l[0].vinId) && !vinById(l[0].vinId).supprime);
+  const fic = new Map();
+  for (const v of vinsActifs()) { const k = cleVin(v); if (!fic.has(k)) fic.set(k, []); fic.get(k).push(v); }
+  const fiches = [...fic.values()].filter(l => l.length > 1);
+  return { entrees, fiches, btlEnTrop: entrees.reduce((a, l) => a + l.slice(1).reduce((b, m) => b + m.qte, 0), 0) };
+}
+function ouvrirDoublons() {
+  const { entrees, fiches, btlEnTrop } = chercherDoublons();
+  if (!entrees.length && !fiches.length) { openSheet(`${head('Contrôle des doublons')}<p>Aucun doublon trouvé : pas d'entrée enregistrée deux fois, pas de fiche en double.</p><p class="muted small">Si le stock paraît encore faux, faites l'inventaire d'une cave pour recompter.</p><div class="row"><button class="btn primary" data-act="inventaire">Faire l'inventaire</button></div>`); return; }
+  openSheet(`${head('Contrôle des doublons', entrees.length ? `${plural(btlEnTrop, 'bouteille')} peut-être en trop` : '')}
+    ${entrees.length ? `<div class="section-title">Entrées enregistrées plusieurs fois</div>
+    <p class="muted small" style="margin:0 0 8px">Même vin, même date, même quantité et même prix. C'est souvent un import ou une synchronisation en double. Gardez une seule entrée si c'est une erreur.</p>
+    ${entrees.map((l, i) => { const v = vinById(l[0].vinId); const m = l[0];
+      return `<div class="doublon"><div><b>${esc(nomComplet(v))}</b><div class="muted small">${l.length} × +${m.qte} btl · ${esc(fmtDate(m.date) || 'date inconnue')} · ${esc(caveNom(m.cave))}${m.prix != null ? ' · ' + EUR2.format(m.prix) : ''} · stock actuel ${qte(v)}</div></div>
+        <button class="btn small-btn" data-act="garder-une" data-id="${i}">Garder une seule (−${l.slice(1).reduce((a, x) => a + x.qte, 0)})</button></div>`; }).join('')}
+    <div class="row" style="margin-top:8px"><button class="btn" data-act="garder-une-tout">Corriger toutes les entrées en double</button></div>` : ''}
+    ${fiches.length ? `<div class="section-title">Fiches en double</div>
+    <p class="muted small" style="margin:0 0 8px">Le même vin a plusieurs fiches. Fusionner regroupe le stock et l'historique sur une seule fiche.</p>
+    ${fiches.map((l, i) => `<div class="doublon"><div><b>${esc(nomComplet(l[0]))}</b><div class="muted small">${l.length} fiches · stocks ${l.map(v => qte(v)).join(' + ')}</div></div>
+      <button class="btn small-btn" data-act="fusionner" data-id="${i}">Fusionner</button></div>`).join('')}` : ''}`);
+  ouvrirDoublons.etat = { entrees, fiches };
+}
+function garderUne(groupes) {
+  let n = 0;
+  commit(() => { for (const l of groupes) for (const m of l.slice(1)) { m.supprime = true; m.maj = nowIso(); n += m.qte; } }, '');
+  toast(`${plural(n, 'bouteille retirée', 'bouteilles retirées')} du stock`);
+}
+function fusionnerFiches(l) {
+  const [garde, ...autres] = l;
+  commit(() => {
+    for (const v of autres) {
+      for (const m of data.mouvements) if (m.vinId === v.id) { m.vinId = garde.id; m.maj = nowIso(); }
+      for (const [c, e] of Object.entries(v.emplacements || {})) if (!garde.emplacements[c]) garde.emplacements[c] = e;
+      for (const k of ['appellation', 'region', 'cepages', 'gardeDebut', 'gardeFin', 'prixEstime', 'photo', 'photoMini', 'notes']) if ((garde[k] === '' || garde[k] == null) && v[k]) garde[k] = v[k];
+      v.supprime = true; v.maj = nowIso();
+    }
+    garde.maj = nowIso();
+  }, 'Fiches fusionnées');
+}
+
+// Inventaire : recompter une cave, emplacement par emplacement. Le brouillon reste sur l'appareil jusqu'à validation.
+const CLE_INV = 'cave.inventaire';
+function lireInv() { try { return JSON.parse(localStorage.getItem(CLE_INV) || 'null'); } catch (e) { return null; } }
+function ecrireInv(x) { try { if (x) localStorage.setItem(CLE_INV, JSON.stringify(x)); else localStorage.removeItem(CLE_INV); } catch (e) { /* sans importance */ } }
+function ouvrirInventaire(caveId) {
+  const brouillon = lireInv();
+  if (!caveId && brouillon) caveId = brouillon.cave;
+  if (!caveId) {
+    openSheet(`${head('Inventaire', 'Recompter les bouteilles, casier par casier')}
+      <p class="muted small">Choisissez la cave à recompter. Vous pouvez vous arrêter en cours de route : le comptage est gardé sur cet appareil jusqu'à ce que vous l'enregistriez.</p>
+      <div class="row">${data.caves.map(c => `<button class="btn" data-act="inventaire-cave" data-id="${esc(c.id)}">${esc(c.nom)} (${vinsActifs().reduce((a, v) => a + qte(v, c.id), 0)})</button>`).join('')}</div>`);
+    return;
+  }
+  computeStock();
+  const inv = brouillon && brouillon.cave === caveId ? brouillon : { cave: caveId, debut: today(), comptes: {} };
+  ecrireInv(inv);
+  const vins = vinsActifs().filter(v => qte(v, caveId) > 0 || inv.comptes[v.id] != null);
+  const groupes = new Map();
+  for (const v of vins) { const e = (v.emplacements || {})[caveId] || 'Sans emplacement'; if (!groupes.has(e)) groupes.set(e, []); groupes.get(e).push(v); }
+  const cles = [...groupes.keys()].sort((a, b) => a === 'Sans emplacement' ? 1 : b === 'Sans emplacement' ? -1 : a.localeCompare(b, 'fr', { numeric: true }));
+  const vus = vins.filter(v => inv.comptes[v.id] != null).length;
+  openSheet(`${head('Inventaire · ' + caveNom(caveId), `${vus} / ${vins.length} vins comptés`)}
+    <p class="muted small" style="margin:0 0 10px">Pour chaque vin, touchez ✓ si le nombre est juste, ou corrigez-le. Les vins non comptés ne changent pas.</p>
+    <div class="inv">${cles.map(e => `<div class="inv-groupe"><div class="inv-titre"><span>📍 ${esc(e)}</span><button class="btn link" data-act="inv-groupe-ok" data-id="${esc(e)}">Tout est juste</button></div>
+      ${trierVins(groupes.get(e)).map(v => { const att = qte(v, caveId); const c = inv.comptes[v.id];
+        return `<div class="inv-ligne${c != null ? (c === att ? ' ok' : ' diff') : ''}" data-vin-inv="${esc(v.id)}" data-emp="${esc(e)}">
+          <div class="inv-nom"><b>${esc(titreVin(v))} ${esc(v.millesime || '')}</b><span class="muted small">${esc(v.domaine || '')} · prévu ${att}</span></div>
+          <div class="inv-saisie"><button type="button" class="btn small-btn inv-ok" data-act="inv-ok" data-id="${esc(v.id)}" aria-label="Le nombre est juste">✓</button>
+          <input type="number" min="0" inputmode="numeric" class="inv-n" data-id="${esc(v.id)}" value="${c ?? att}" aria-label="Bouteilles comptées"></div></div>`; }).join('')}</div>`).join('')}</div>
+    <div class="row" style="margin-top:12px"><button class="btn primary" data-act="inv-valider">Voir les écarts et enregistrer</button><button class="btn" data-act="inv-abandon">Abandonner</button></div>`);
+}
+function noterCompte(id, n) {
+  const inv = lireInv(); if (!inv) return;
+  inv.comptes[id] = Math.max(0, int(n) ?? 0); ecrireInv(inv);
+  const l = $(`[data-vin-inv="${CSS.escape(id)}"]`);
+  if (l) { const att = qte(vinById(id), inv.cave); l.classList.toggle('ok', inv.comptes[id] === att); l.classList.toggle('diff', inv.comptes[id] !== att); }
+  const t = $('#sheetBody .sheet-head .sub'); if (t) t.textContent = `${Object.keys(inv.comptes).length} / ${$$('.inv-ligne').length} vins comptés`;
+}
+function validerInventaire(confirme) {
+  const inv = lireInv(); if (!inv) return;
+  computeStock();
+  const ecarts = Object.entries(inv.comptes).map(([id, n]) => ({ v: vinById(id), n, att: qte(vinById(id), inv.cave) })).filter(x => x.v && x.n !== x.att);
+  if (!confirme) {
+    const moins = ecarts.reduce((a, x) => a + Math.max(0, x.att - x.n), 0), plus = ecarts.reduce((a, x) => a + Math.max(0, x.n - x.att), 0);
+    openSheet(`${head('Écarts d’inventaire', caveNom(inv.cave))}
+      ${ecarts.length ? `<p>${plural(ecarts.length, 'vin')} à corriger : <b>−${moins}</b> / <b>+${plural(plus, 'bouteille')}</b>.</p>
+      <table class="stock-table">${ecarts.map(x => `<tr><td>${esc(nomComplet(x.v))}</td><td class="q">${x.att} → ${x.n}</td></tr>`).join('')}</table>
+      <p class="muted small">Chaque écart est noté « Inventaire » dans le journal ; on peut l'annuler depuis le journal.</p>` : '<p>Aucun écart : tout ce que vous avez compté correspond au stock.</p>'}
+      <div class="row" style="margin-top:12px"><button class="btn primary" data-act="inv-enregistrer">${ecarts.length ? 'Enregistrer les corrections' : 'Terminer l’inventaire'}</button><button class="btn" data-act="inventaire">Continuer à compter</button></div>`);
+    return;
+  }
+  commit(() => ecarts.forEach(x => data.mouvements.push({ id: uid('m'), vinId: x.v.id, type: 'ajustement', date: today(), qte: x.n - x.att, cave: inv.cave, note: 'Inventaire', maj: nowIso() })),
+    ecarts.length ? `Inventaire enregistré : ${plural(ecarts.length, 'vin corrigé', 'vins corrigés')}` : 'Inventaire terminé');
+  ecrireInv(null);
+  closeSheet();
+}
+
 function formCorriger(id) {
   const v = vinById(id);
   openSheet(`${head('Corriger le stock', nomComplet(v))}<form class="f"><p class="muted small" style="margin:0">Indiquez le nombre réel de bouteilles après un inventaire. La différence est notée dans le journal.</p>
@@ -1468,6 +1582,17 @@ document.addEventListener('click', e => {
     case 'photo': choisirPhoto(id); break;
     case 'theme': appliquerTheme(id); render(); break;
     case 'valider-achats': validerAchats(); break;
+    case 'doublons': ouvrirDoublons(); break;
+    case 'garder-une': garderUne([ouvrirDoublons.etat.entrees[+id]]); ouvrirDoublons(); break;
+    case 'garder-une-tout': garderUne(ouvrirDoublons.etat.entrees); ouvrirDoublons(); break;
+    case 'fusionner': fusionnerFiches(ouvrirDoublons.etat.fiches[+id]); ouvrirDoublons(); break;
+    case 'inventaire': ouvrirInventaire(); break;
+    case 'inventaire-cave': ouvrirInventaire(id); break;
+    case 'inv-ok': { const inp = $(`.inv-n[data-id="${CSS.escape(id)}"]`); noterCompte(id, inp ? inp.value : 0); break; }
+    case 'inv-groupe-ok': $$(`.inv-ligne[data-emp="${CSS.escape(id)}"] .inv-n`).forEach(i => noterCompte(i.dataset.id, i.value)); break;
+    case 'inv-valider': validerInventaire(false); break;
+    case 'inv-enregistrer': validerInventaire(true); break;
+    case 'inv-abandon': ecrireInv(null); closeSheet(); toast('Inventaire abandonné'); render(); break;
     case 'photo-web': lienPhotoWeb(id); break;
     case 'photo-suppr': {
       const v = vinById(id);
@@ -1522,6 +1647,7 @@ document.addEventListener('click', e => {
 document.addEventListener('input', e => {
   if (e.target.id === 'q') { ui.q = e.target.value; renderList(); }
   if (e.target.id === 'qb') { listeVinBu(e.target.value); return; }
+  if (e.target.classList.contains('inv-n') && e.target.value !== '') { noterCompte(e.target.dataset.id, e.target.value); return; }
   // Quantité maximale = stock de la cave choisie (sortie, déplacement)
   const vinId = $('#sheet').dataset.vin;
   if (e.target.name === 'cave' && e.target.form && vinId) {

@@ -469,3 +469,17 @@ a.btn { text-decoration: none; }
 body { padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
 .fab { bottom: calc(74px + env(safe-area-inset-bottom)); right: max(18px, calc((100vw - 760px) / 2 + 18px)); }
 .fab-boire { right: auto; left: max(18px, calc((100vw - 760px) / 2 + 18px)); }
+
+/* Contrôle : doublons et inventaire */
+.doublon { display: flex; gap: 10px; justify-content: space-between; align-items: center; padding: 10px 0; border-top: 1px solid var(--line); }
+.doublon > div { min-width: 0; }
+.doublon .btn { flex: none; }
+.inv { display: grid; gap: 14px; }
+.inv-titre { display: flex; justify-content: space-between; align-items: center; font-weight: 700; color: var(--title); border-bottom: 1px solid var(--rule); padding-bottom: 4px; }
+.inv-ligne { display: flex; gap: 10px; justify-content: space-between; align-items: center; padding: 8px 6px; border-bottom: 1px solid var(--line); border-radius: 6px; }
+.inv-ligne.ok { background: color-mix(in srgb, var(--ok) 12%, transparent); }
+.inv-ligne.diff { background: color-mix(in srgb, var(--warn) 16%, transparent); }
+.inv-nom { display: grid; min-width: 0; }
+.inv-saisie { display: flex; gap: 6px; align-items: center; flex: none; }
+.inv-n { width: 64px; padding: 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--text); font-size: 16px; text-align: center; font-variant-numeric: tabular-nums; }
+.inv-ok { min-width: 40px; }
