@@ -461,3 +461,11 @@ a.btn { text-decoration: none; }
 .achat { display: flex; gap: 10px; justify-content: space-between; align-items: center; padding: 10px; border: 1px solid var(--line); border-radius: 10px; }
 .achat .nouveau { color: var(--ok); font-weight: 600; }
 .achat-q { font: 700 20px var(--serif); color: var(--title); font-variant-numeric: tabular-nums; }
+
+/* Barre du bas compacte, et centrée sur grand écran */
+.tabs { grid-template-columns: repeat(5, 1fr); padding-inline: max(0px, calc((100vw - 760px) / 2)); }
+.tabs button { padding: 6px 0 7px; gap: 1px; font-size: 10.5px; }
+.tabs svg { width: 20px; height: 20px; }
+body { padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
+.fab { bottom: calc(74px + env(safe-area-inset-bottom)); right: max(18px, calc((100vw - 760px) / 2 + 18px)); }
+.fab-boire { right: auto; left: max(18px, calc((100vw - 760px) / 2 + 18px)); }
