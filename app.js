@@ -1271,17 +1271,26 @@ function validerInventaire(confirme) {
   const inv = lireInv(); if (!inv) return;
   computeStock();
   const ecarts = Object.entries(inv.comptes).map(([id, n]) => ({ v: vinById(id), n, att: qte(vinById(id), inv.cave) })).filter(x => x.v && x.n !== x.att);
+  const nouveaux = inv.nouveaux || [], emps = Object.entries(inv.emplacements || {}).filter(([id]) => vinById(id));
   if (!confirme) {
     const moins = ecarts.reduce((a, x) => a + Math.max(0, x.att - x.n), 0), plus = ecarts.reduce((a, x) => a + Math.max(0, x.n - x.att), 0);
     openSheet(`${head('Écarts d’inventaire', caveNom(inv.cave))}
       ${ecarts.length ? `<p>${plural(ecarts.length, 'vin')} à corriger : <b>−${moins}</b> / <b>+${plural(plus, 'bouteille')}</b>.</p>
       <table class="stock-table">${ecarts.map(x => `<tr><td>${esc(nomComplet(x.v))}</td><td class="q">${x.att} → ${x.n}</td></tr>`).join('')}</table>
       <p class="muted small">Chaque écart est noté « Inventaire » dans le journal ; on peut l'annuler depuis le journal.</p>` : '<p>Aucun écart : tout ce que vous avez compté correspond au stock.</p>'}
-      <div class="row" style="margin-top:12px"><button class="btn primary" data-act="inv-enregistrer">${ecarts.length ? 'Enregistrer les corrections' : 'Terminer l’inventaire'}</button><button class="btn" data-act="inventaire">Continuer à compter</button></div>`);
+      ${nouveaux.length ? `<div class="section-title">Vins trouvés en cave, sans fiche</div><table class="stock-table">${nouveaux.map(x => `<tr><td>${esc(nomComplet(x.vin))}<div class="muted small">${esc([x.vin.domaine, x.vin.appellation].filter(Boolean).join(' · '))} · nouvelle fiche</div></td><td class="q">+${x.n}</td></tr>`).join('')}</table>` : ''}
+      ${emps.length ? `<p class="small">📍 Emplacement noté pour ${plural(emps.length, 'vin')} : ${esc([...new Set(emps.map(([, e]) => e))].join(', '))}.</p>` : ''}
+      <div class="row" style="margin-top:12px"><button class="btn primary" data-act="inv-enregistrer">${ecarts.length || nouveaux.length ? 'Enregistrer les corrections' : 'Terminer l’inventaire'}</button><button class="btn" data-act="inventaire">Continuer à compter</button></div>`);
     return;
   }
-  commit(() => ecarts.forEach(x => data.mouvements.push({ id: uid('m'), vinId: x.v.id, type: 'ajustement', date: today(), qte: x.n - x.att, cave: inv.cave, note: 'Inventaire', maj: nowIso() })),
-    ecarts.length ? `Inventaire enregistré : ${plural(ecarts.length, 'vin corrigé', 'vins corrigés')}` : 'Inventaire terminé');
+  commit(() => {
+    ecarts.forEach(x => data.mouvements.push({ id: uid('m'), vinId: x.v.id, type: 'ajustement', date: today(), qte: x.n - x.att, cave: inv.cave, note: 'Inventaire', maj: nowIso() }));
+    for (const x of nouveaux) {
+      data.vins.push({ emplacements: {}, aVerifier: '', format: 'Bouteille', ...x.vin, maj: nowIso() });
+      if (x.n > 0) data.mouvements.push({ id: uid('m'), vinId: x.vin.id, type: 'ajustement', date: today(), qte: x.n, cave: inv.cave, note: 'Inventaire : trouvé en cave', maj: nowIso() });
+    }
+    for (const [id, e] of emps) { const v = vinById(id); v.emplacements[inv.cave] = e; v.maj = nowIso(); }
+  }, ecarts.length || nouveaux.length ? `Inventaire enregistré : ${plural(ecarts.length + nouveaux.length, 'vin corrigé', 'vins corrigés')}` : 'Inventaire terminé');
   ecrireInv(null);
   closeSheet();
 }
@@ -1490,6 +1499,8 @@ function importerDonnees(obj) {
     if (!data) { toast('Chargez d’abord votre cave'); return; }
     const inv = lireInv() && lireInv().cave === obj.inventaire.cave ? lireInv() : { cave: obj.inventaire.cave || data.caves[0].id, debut: today(), comptes: {} };
     for (const [id, n] of Object.entries(obj.inventaire.comptes)) if (vinById(id)) inv.comptes[id] = Math.max(0, int(n) ?? 0);
+    inv.nouveaux = (obj.inventaire.nouveaux || []).filter(x => x && x.vin && x.vin.id && !vinById(x.vin.id));
+    inv.emplacements = obj.inventaire.emplacements || {};
     ecrireInv(inv); validerInventaire(false); return;
   }
   if (obj && obj.historique) { importerHistorique(obj.historique); return; }
