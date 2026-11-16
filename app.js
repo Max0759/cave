@@ -382,7 +382,7 @@ async function enregistrerPhoto(v, file) {
   const moyen = await reduire(img, 640, 0.72);
   return { photo: moyen.dataUrl(), photoMini: mini.dataUrl() };
 }
-function choisirPhoto(id) {
+function choisirPhoto(id, apres) {
   const v = vinById(id);
   const inp = document.createElement('input');
   inp.type = 'file'; inp.accept = 'image/*';
@@ -393,7 +393,7 @@ function choisirPhoto(id) {
     try {
       const r = await enregistrerPhoto(v, f);
       commit(() => { Object.assign(v, r); v.maj = nowIso(); }, 'Photo enregistrée');
-      ouvrirVin(v.id);
+      if (apres) apres(); else ouvrirVin(v.id);
     } catch (e) { toast('Photo impossible : ' + e.message); }
   };
   inp.click();
@@ -515,6 +515,28 @@ async function photoScanSurFiche(v) {
   if (!scan || !scan.file || v.photo || (coche && !coche.checked)) return;
   const file = scan.file; scan.file = null;
   try { const r = await enregistrerPhoto(v, file); commit(() => { Object.assign(v, r); v.maj = nowIso(); }); } catch (e) { /* la photo est facultative */ }
+}
+
+// Assistant photos : les vins en stock sans photo, avec appareil photo ou image du web pour chacun
+function assistantPhotos() {
+  computeStock();
+  const sans = trierVins(vinsActifs().filter(v => qte(v) > 0 && !v.photo));
+  const total = vinsActifs().filter(v => qte(v) > 0).length;
+  openSheet(`${head('Photos des bouteilles', `${total - sans.length} / ${total} vins en stock ont une photo`)}
+    <p class="muted small" style="margin:0 0 10px">📷 photographie la bouteille. 🔎 ouvre la recherche d'images : appui long sur une image, « Copier l'adresse de l'image », revenez ici et collez-la dans le champ.</p>
+    ${sans.length ? `<div class="assist">${sans.map(v => `<div class="assist-ligne" data-assist="${esc(v.id)}">
+      <div class="inv-nom"><b>${esc(titreVin(v))} ${esc(v.millesime || '')}</b><span class="muted small">${esc(v.domaine || v.appellation || '')} · ${qte(v)} btl</span></div>
+      <div class="assist-actions"><button type="button" class="btn small-btn" data-act="assist-photo" data-id="${esc(v.id)}" aria-label="Photographier">📷</button>
+      <a class="btn small-btn" href="${esc(rechercheImage(v))}" target="_blank" rel="noopener" aria-label="Chercher une image">🔎</a></div>
+      <input class="assist-url" data-id="${esc(v.id)}" type="url" inputmode="url" placeholder="Coller l'adresse de l'image ici" autocomplete="off"></div>`).join('')}</div>`
+      : '<p>Tous les vins en stock ont une photo. 🎉</p>'}`);
+}
+function enregistrerUrlPhoto(id, u) {
+  const x = String(u || '').trim();
+  if (!/^https?:\/\/\S+$/.test(x)) { toast('Ce n’est pas une adresse d’image'); return; }
+  const v = vinById(id);
+  commit(() => { v.photo = x; v.photoMini = x; v.maj = nowIso(); }, 'Image enregistrée');
+  assistantPhotos();
 }
 
 const rechercheImage = v => 'https://www.google.com/search?tbm=isch&q=' + encodeURIComponent([v.domaine, v.cuvee, v.appellation, v.millesime, 'bouteille'].filter(Boolean).join(' '));
@@ -946,6 +968,9 @@ function renderBilan() {
     <button class="btn" data-act="ajouter-cave" style="margin-top:8px">Ajouter une cave</button></div>`;
   html += `<div class="card"><h2>Lecture des étiquettes</h2><p class="small" style="margin:0 0 8px">Le bouton 📷 Scanner ouvre le lecteur d'étiquettes sur claude.ai : la lecture est incluse dans votre abonnement Claude.</p>
     <a class="btn" href="${esc(LECTEUR())}" target="_blank" rel="noopener">Ouvrir le lecteur</a></div>`;
+  const enStockB = vinsActifs().filter(v => qte(v) > 0), avecPhoto = enStockB.filter(v => v.photo).length;
+  html += `<div class="card"><h2>Photos des bouteilles</h2><p class="small" style="margin:0 0 8px">${avecPhoto} / ${enStockB.length} vins en stock ont une photo.</p>
+    <button class="btn" data-act="photos">Ajouter les photos manquantes</button></div>`;
   const th = themeActuel();
   html += `<div class="card"><h2>Apparence</h2><div class="theme-pick">${[['auto', 'Automatique'], ['etiquette', 'Étiquette'], ['cave', 'Cave']].map(([k, l]) =>
     `<button type="button" class="chip" data-act="theme" data-id="${k}" aria-pressed="${th === k}">${l}</button>`).join('')}</div>
@@ -1656,6 +1681,8 @@ document.addEventListener('click', e => {
     case 'valider-achats': validerAchats(); break;
     case 'valider-historique': validerHistorique(); break;
     case 'valider-restauration': validerRestauration(); break;
+    case 'photos': assistantPhotos(); break;
+    case 'assist-photo': choisirPhoto(id, assistantPhotos); break;
     case 'doublons': ouvrirDoublons(); break;
     case 'garder-une': garderUne([ouvrirDoublons.etat.entrees[+id]]); ouvrirDoublons(); break;
     case 'garder-une-tout': garderUne(ouvrirDoublons.etat.entrees); ouvrirDoublons(); break;
@@ -1721,6 +1748,7 @@ document.addEventListener('click', e => {
 document.addEventListener('input', e => {
   if (e.target.id === 'q') { ui.q = e.target.value; renderList(); }
   if (e.target.id === 'qb') { listeVinBu(e.target.value); return; }
+  if (e.target.classList.contains('assist-url') && /^https?:\/\/\S+\.\S+/.test(e.target.value.trim())) { enregistrerUrlPhoto(e.target.dataset.id, e.target.value); return; }
   if (e.target.classList.contains('inv-n') && e.target.value !== '') { noterCompte(e.target.dataset.id, e.target.value); return; }
   // Quantité maximale = stock de la cave choisie (sortie, déplacement)
   const vinId = $('#sheet').dataset.vin;
